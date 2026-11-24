@@ -1,0 +1,12 @@
+{
+  "interval": "6h",
+  "logging": { "level": "info", "format": "text" },
+  "tenants": [
+    {
+      "tenantName": "Contoso",
+      "tenantId": "00000000-0000-0000-0000-000000000000",
+      "clientId": "11111111-1111-1111-1111-111111111111",
+      "clientSecretEnv": "AZCONFIGDRIFT_CONTOSO_SECRET"
+    }
+  ]
+}

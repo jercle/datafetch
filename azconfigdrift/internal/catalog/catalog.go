@@ -25,6 +25,18 @@ const (
 	// KindEXO is an Exchange Online cmdlet, run through the REST endpoint
 	// the Exchange Online PowerShell module uses.
 	KindEXO = "exo"
+	// KindMDE is a list of the Microsoft Defender for Endpoint API, which
+	// has an address and permissions of its own.
+	KindMDE = "mde"
+	// KindSPO is the SharePoint Online admin site's REST API.
+	KindSPO = "spo"
+	// KindPP is the Power Platform admin API.
+	KindPP = "powerplatform"
+	// KindPwsh is a cmdlet of a PowerShell module that has no REST API
+	// behind it the collector could call: run with pwsh, by an embedded
+	// script. Where pwsh or the module is not installed the source is
+	// reported as unsupported.
+	KindPwsh = "pwsh"
 )
 
 // Source is one thing to read in a tenant.
@@ -42,6 +54,9 @@ type Source struct {
 	Other bool
 	Query string
 
+	// Resource Manager: {workspace} repeats the source for every Log
+	// Analytics workspace that Microsoft Sentinel is enabled on, and stands
+	// for the workspace's resource ID.
 	// Resource Manager and Graph: the path. {subscriptionId} repeats a
 	// Resource Manager path for every subscription; {tenantId} is replaced.
 	Path string
@@ -58,6 +73,28 @@ type Source struct {
 	// Attach reads another list once and stores each of its objects inside
 	// the object of this source it belongs to.
 	Attach []Attach
+	// Each, for a Resource Manager path with {resource}: the resource
+	// types, in lower case, the source is read once for each resource of.
+	// {resource} stands for the resource's ID.
+	Each []string
+	// Method is the HTTP method where it is not GET (Power Platform).
+	Method string
+	// Script names the embedded PowerShell script of a pwsh source.
+	Script string
+	// Nest stores the resources of a child type inside their parent
+	// resource instead of as objects of their own (Resource Graph).
+	Nest []Nest
+	// NameFrom is the path of the property an object is named after, when
+	// its own name says nothing (a role definition's is a GUID).
+	NameFrom string
+	// Roles stores the directory and Azure roles assigned to a principal
+	// inside it: RolesPrincipal when the object is the principal,
+	// RolesApplication when it is an app registration, whose roles are
+	// those of its service principal.
+	Roles string
+	// Principals makes the source one object per principal that has a
+	// role, with its roles, instead of reading Path.
+	Principals bool
 	// Keep limits a Graph list to the objects whose property has (or, with
 	// Not, has not) a value.
 	Keep *Keep
@@ -98,6 +135,26 @@ type Attach struct {
 	// Permission the list needs. Without it the source is still read, and
 	// Field left out.
 	Permission string
+}
+
+// Nest is a resource type whose resources belong inside their parent: the
+// type, in lower case, and the property of the parent they are stored in.
+type Nest struct {
+	Type  string
+	Field string
+}
+
+// Values of Source.Roles.
+const (
+	RolesPrincipal   = "principal"
+	RolesApplication = "application"
+)
+
+// RoleRefs are the identifiers in the roles stored inside a principal.
+var RoleRefs = []Ref{
+	{Path: "directoryRoles.*.roleDefinitionId", Kind: RefEntraRole},
+	{Path: "azureRoles.*.roleDefinitionId", Kind: RefAzureRole},
+	{Path: "azureRoles.*.scope", Kind: RefAzureScope},
 }
 
 // Keep is a condition on a property of a Graph object.
@@ -158,6 +215,16 @@ func (s Source) Reads() string {
 		return "Microsoft Graph: " + path
 	case KindEXO:
 		return "Exchange Online: " + s.Cmdlet
+	case KindMDE:
+		path, _, _ := strings.Cut(s.Path, "?")
+		return "Defender for Endpoint API: " + path
+	case KindSPO:
+		return "SharePoint admin site: " + s.Path
+	case KindPP:
+		path, _, _ := strings.Cut(s.Path, "?")
+		return "Power Platform admin API: " + path
+	case KindPwsh:
+		return "PowerShell (" + s.Script + "): " + s.Cmdlet
 	}
 	return s.Kind
 }

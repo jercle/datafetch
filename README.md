@@ -6,7 +6,7 @@ writes to the same MongoDB collections its part of the dashboard reads.
 
 | Command | What it does | App Configuration key | Merged from | Its own documentation |
 |---|---|---|---|---|
-| `datafetch az-config-drift` | Snapshots of Azure and Microsoft 365 configuration, with baselines and drift | `datafetching.azConfigDrift` | `jercle/az-config-drift` at `adde807` | [azconfigdrift/README.md](azconfigdrift/README.md) |
+| `datafetch az-config-drift` | Snapshots of Azure and Microsoft 365 configuration, with baselines and drift | `datafetching.azConfigDrift` | `jercle/az-config-drift` at `d49f19c` | [azconfigdrift/README.md](azconfigdrift/README.md) |
 | `datafetch az-storage` | Storage accounts, blob containers and managed disks, with their sizes | `datafetching.azStorage` | `jercle/az-storage` at `49359f1` | [azstorage/README.md](azstorage/README.md) |
 | `datafetch azure-cves` | Azure resources, Defender devices, their software and CVEs, as a graph | `datafetching.azureCves` | `jercle/azure-cves` at `7f871ff` | [azurecves/README.md](azurecves/README.md) |
 | `datafetch dmarc-reporting` | DMARC failure and aggregate reports from an Exchange Online mailbox | `datafetching.dmarcReporting` | `jercle/dmarc-reporting` at `55f8b76` | [dmarcreporting/README.md](dmarcreporting/README.md) |

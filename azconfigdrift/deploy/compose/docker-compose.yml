@@ -1,0 +1,61 @@
+# az-config-drift on one machine: MongoDB and the collector.
+#
+#   cd deploy/compose
+#   cp .env.example .env          # fill in
+#   cp config.example.json config.json   # your tenants
+#   docker compose up -d --build
+#   docker compose logs -f collector
+#
+# The dashboard is not a container of its own: its modules live in cld-dash.
+# Point cld-dash at this database (mongodb://…@localhost:27017, database
+# azconfigdrift) to see the data.
+name: az-config-drift
+
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:?set MONGO_USER in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      # Only this machine can reach it. Remove if cld-dash runs in compose too.
+      - "127.0.0.1:27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  collector:
+    build:
+      # The repository root: the image is datafetch, with every tool in it.
+      context: ../../..
+      # Dockerfile.pwsh for the Microsoft Teams module.
+      dockerfile: ${COLLECTOR_DOCKERFILE:-Dockerfile}
+      args:
+        VERSION: ${VERSION:-local}
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    # The image's entry point is datafetch: the tool comes first. This runs
+    # on the file alone; to use Azure App Configuration as well, set
+    # AZURE_APPCONFIG_* in .env and remove "-no-app-config".
+    command: ["az-config-drift", "-loop", "-no-app-config", "-config", "/etc/az-config-drift/config.json"]
+    env_file: .env
+    environment:
+      AZCONFIGDRIFT_MONGO_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
+    volumes:
+      - ./config.json:/etc/az-config-drift/config.json:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # More than one is safe: each tenant is read by one collector at a time.
+    deploy:
+      replicas: ${COLLECTOR_REPLICAS:-1}
+
+volumes:
+  mongo-data:

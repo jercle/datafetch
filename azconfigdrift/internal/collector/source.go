@@ -81,6 +81,11 @@ func (c *Collector) collectSource(ctx context.Context, env *tenantEnv, m catalog
 		var items []model.Item
 		var changes []model.Change
 		touch := map[string][]string{}
+		if src.NameFrom != "" {
+			for i := range batch {
+				values(batch[i].Body, strings.Split(src.NameFrom, "."), func(n string) { batch[i].Name = n })
+			}
+		}
 		env.fetcher.resolve(ctx, src, batch)
 		for _, r := range batch {
 			id := model.ItemID(env.scope.TenantID, m.ID, src.ID, r.Key)
@@ -88,7 +93,7 @@ func (c *Collector) collectSource(ctx context.Context, env *tenantEnv, m catalog
 				continue
 			}
 			// Left out by the configuration: as if it were not there.
-			if c.Cfg.Excluded(m.ID, r.Type, r.ResourceGroup, r.Name) {
+			if c.Cfg.Excluded(env.scope.TenantID, m.ID, r.Type, r.ResourceGroup, r.Name) {
 				excluded++
 				continue
 			}
@@ -179,7 +184,7 @@ func (c *Collector) collectSource(ctx context.Context, env *tenantEnv, m catalog
 		}
 		// Changes first: if the items are stored and the changes are not,
 		// the change would never be recorded.
-		if err := c.Store.SaveChanges(ctx, changes); err != nil {
+		if err := c.saveChanges(ctx, p, baselineID, changes); err != nil {
 			return err
 		}
 		if err := c.Store.SaveItems(ctx, items); err != nil {
@@ -207,7 +212,7 @@ func (c *Collector) collectSource(ctx context.Context, env *tenantEnv, m catalog
 		}
 		// Left out by the configuration since it was stored: forgotten,
 		// not recorded as removed from the tenant.
-		if c.Cfg.Excluded(m.ID, ref.Type, ref.ResourceGroup, ref.Name) {
+		if c.Cfg.Excluded(env.scope.TenantID, m.ID, ref.Type, ref.ResourceGroup, ref.Name) {
 			forget = append(forget, id)
 			continue
 		}
@@ -227,7 +232,7 @@ func (c *Collector) collectSource(ctx context.Context, env *tenantEnv, m catalog
 			forget = append(forget, id)
 		}
 	}
-	err = c.Store.SaveChanges(ctx, changes)
+	err = c.saveChanges(ctx, p, baselineID, changes)
 	if err == nil {
 		err = c.Store.TombstoneItems(ctx, gone, start, p.run.ID, model.Drift{BaselineID: baselineID, Status: model.DriftRemoved})
 	}
@@ -252,4 +257,24 @@ func nonEmpty(parts ...string) []string {
 		}
 	}
 	return out
+}
+
+// saveChanges records what changed between this pass and the one before:
+// as change records, and in the history of each setting since the
+// baseline.
+func (c *Collector) saveChanges(ctx context.Context, p *pass, baselineID string, changes []model.Change) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	if err := c.Store.SaveChanges(ctx, changes); err != nil {
+		return err
+	}
+	if err := c.Store.RecordHistory(ctx, baselineID, changes); err != nil {
+		return err
+	}
+	p.objects.Add(int64(len(changes)))
+	for _, ch := range changes {
+		p.settings.Add(int64(max(1, len(ch.Paths))))
+	}
+	return nil
 }

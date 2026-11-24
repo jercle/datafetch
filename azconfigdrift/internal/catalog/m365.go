@@ -47,6 +47,19 @@ func (s Source) title(paths ...string) Source { s.Title = paths; return s }
 
 func (s Source) typed(t string) Source { s.Type = t; return s }
 
+// roles stores the principal's directory and Azure roles inside it.
+func (s Source) roles(mode string) Source {
+	s.Roles = mode
+	s.Refs = append(s.Refs, RoleRefs...)
+	return s
+}
+
+// teams is a cmdlet of the MicrosoftTeams PowerShell module.
+func teams(id, name, cmd string) Source {
+	return Source{ID: id, Name: name, Kind: KindPwsh, Script: "teams", Cmdlet: cmd, Type: id, KeyField: "Identity",
+		Permission: "the Teams Administrator (or Global Reader) role for the application, and pwsh with the MicrosoftTeams module where the collector runs"}
+}
+
 func cmdlet(id, name, cmd string) Source {
 	return Source{
 		ID: id, Name: name, Kind: KindEXO, Cmdlet: cmd, Type: id, KeyField: "Guid",
@@ -127,6 +140,13 @@ func m365Modules() []Module {
 			Sources: []Source{
 				list("role-definitions", "Role definitions", "/roleManagement/directory/roleDefinitions", roles),
 				list("role-assignments", "Role assignments", "/roleManagement/directory/roleAssignments", roles).refs(principal, entraRole).title("principalId", "roleDefinitionId"),
+				// One object per user, group or application that holds a
+				// role, with every directory and Azure role it holds.
+				func() Source {
+					s := list("principal-roles", "Roles by principal", "/roleManagement/directory/roleAssignments", roles).refs(Ref{Path: "id", Kind: RefPrincipal}).title("id").roles(RolesPrincipal)
+					s.Principals = true
+					return s
+				}(),
 				list("role-eligibility", "Eligible assignments", "/roleManagement/directory/roleEligibilitySchedules", "RoleEligibilitySchedule.Read.Directory").ignore("status").
 					refs(principal, entraRole).title("principalId", "roleDefinitionId"),
 				list("pim-policies", "PIM role settings", "/policies/roleManagementPolicies"+pimScope+"&$expand=rules", pim),
@@ -137,13 +157,13 @@ func m365Modules() []Module {
 			ID: "m365-applications", Platform: model.PlatformM365, Name: "Applications", DefaultEnabled: true,
 			Description: "App registrations, enterprise applications with the delegated permissions granted to them, and managed identities.",
 			Sources: []Source{
-				list("applications", "App registrations", "/applications?$top=999", "Application.Read.All"),
+				list("applications", "App registrations", "/applications?$top=999", "Application.Read.All").roles(RolesApplication),
 				list("service-principals", "Enterprise applications", "/servicePrincipals?$top=999", "Application.Read.All").
-					keep("servicePrincipalType", "ManagedIdentity", true).attach(grants).refs(grantRefs...),
+					keep("servicePrincipalType", "ManagedIdentity", true).attach(grants).refs(grantRefs...).roles(RolesPrincipal),
 				// Managed identities are service principals too; they are
 				// listed as a type of their own.
 				list("managed-identities", "Managed identities", "/servicePrincipals?$top=999", "Application.Read.All").
-					keep("servicePrincipalType", "ManagedIdentity", false).attach(grants).refs(grantRefs...).typed("managed-identities"),
+					keep("servicePrincipalType", "ManagedIdentity", false).attach(grants).refs(grantRefs...).typed("managed-identities").roles(RolesPrincipal),
 			},
 		},
 		{
@@ -231,6 +251,70 @@ func m365Modules() []Module {
 			},
 		},
 		{
+			ID: "m365-sharepoint", Platform: model.PlatformM365, Name: "SharePoint Online tenant", DefaultEnabled: true,
+			Description: "Every tenant setting of SharePoint and OneDrive, as Get-SPOTenant shows them.",
+			Sources: []Source{
+				// SharePoint refuses tokens an application got with a client
+				// secret, so this is read as the service account by default.
+				{ID: "tenant", Name: "Tenant settings", Kind: KindSPO, Path: "/_api/SPO.Tenant", Type: "sharepoint-tenant", Single: true, Delegated: true,
+					Permission: "the service account, with the SharePoint Administrator role",
+					// What is used, as opposed to what is allowed.
+					Ignore: []string{"StorageQuotaAllocated", "ResourceQuotaAllocated", "odata.metadata", "odata.type", "odata.id", "odata.editLink"}},
+			},
+		},
+		{
+			ID: "m365-power-platform", Platform: model.PlatformM365, Name: "Power Platform", DefaultEnabled: true,
+			Description: "Power Platform tenant settings, data loss prevention policies and environments.",
+			Sources: func() []Source {
+				const p = "the application registered as a Power Platform management application"
+				return []Source{
+					{ID: "tenant-settings", Name: "Tenant settings", Kind: KindPP, Method: "POST", Single: true, Type: "tenant-settings", Permission: p,
+						Path: "/providers/Microsoft.BusinessAppPlatform/listTenantSettings?api-version=2021-04-01"},
+					{ID: "dlp-policies", Name: "Data loss prevention policies", Kind: KindPP, Type: "dlp-policies", Permission: p, KeyField: "name",
+						Path: "/providers/PowerPlatform.Governance/v2/policies", Ignore: []string{"etag", "lastModifiedTime"}},
+					{ID: "environments", Name: "Environments", Kind: KindPP, Type: "environments", Permission: p, KeyField: "name", NameFrom: "properties.displayName",
+						Path:   "/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=2021-04-01",
+						Ignore: []string{"properties.lastModifiedTime", "properties.lastActivity", "properties.capacity", "properties.states.runtime", "properties.clientUris"}},
+				}
+			}(),
+		},
+		{
+			ID: "m365-teams", Platform: model.PlatformM365, Name: "Microsoft Teams policies", DefaultEnabled: false,
+			Description: "Meeting, messaging, calling and app policies, external and guest access. Read with the MicrosoftTeams PowerShell module, which must be installed where the collector runs.",
+			Sources: []Source{
+				teams("meeting-policies", "Meeting policies", "Get-CsTeamsMeetingPolicy"),
+				teams("messaging-policies", "Messaging policies", "Get-CsTeamsMessagingPolicy"),
+				teams("calling-policies", "Calling policies", "Get-CsTeamsCallingPolicy"),
+				teams("app-permission-policies", "App permission policies", "Get-CsTeamsAppPermissionPolicy"),
+				teams("app-setup-policies", "App setup policies", "Get-CsTeamsAppSetupPolicy"),
+				teams("channels-policies", "Teams and channels policies", "Get-CsTeamsChannelsPolicy"),
+				teams("live-event-policies", "Live event policies", "Get-CsTeamsMeetingBroadcastPolicy"),
+				teams("events-policies", "Events policies", "Get-CsTeamsEventsPolicy"),
+				teams("update-policies", "Update policies", "Get-CsTeamsUpdateManagementPolicy"),
+				teams("external-access-policies", "External access policies", "Get-CsExternalAccessPolicy"),
+				teams("federation", "External access (federation) settings", "Get-CsTenantFederationConfiguration"),
+				teams("client-configuration", "Teams client configuration", "Get-CsTeamsClientConfiguration"),
+				teams("meeting-configuration", "Meeting configuration", "Get-CsTeamsMeetingConfiguration"),
+				teams("guest-meeting", "Guest meeting settings", "Get-CsTeamsGuestMeetingConfiguration"),
+				teams("guest-messaging", "Guest messaging settings", "Get-CsTeamsGuestMessagingConfiguration"),
+				teams("guest-calling", "Guest calling settings", "Get-CsTeamsGuestCallingConfiguration"),
+			},
+		},
+		{
+			ID: "m365-defender", Platform: model.PlatformM365, Name: "Defender XDR", DefaultEnabled: true,
+			Description: "Custom detection rules, Defender for Identity sensors and Defender for Endpoint indicators.",
+			Sources: []Source{
+				// Only in beta. When a rule last ran and what it found is not configuration.
+				list("detection-rules", "Custom detection rules", "/security/rules/detectionRules", "CustomDetection.Read.All").beta().
+					ignore("lastRunDetails", "lastModifiedDateTime"),
+				// How a sensor is doing changes by the hour; how it is set up does not.
+				list("identity-sensors", "Defender for Identity sensors", "/security/identities/sensors", "SecurityIdentitiesSensors.Read.All").
+					ignore("healthStatus", "openHealthIssuesCount", "version", "serviceStatus", "createdDateTime"),
+				{ID: "indicators", Name: "Defender for Endpoint indicators", Kind: KindMDE, Path: "/api/indicators", Type: "indicators",
+					Permission: "Ti.Read.All on WindowsDefenderATP", Ignore: []string{"@odata.type"}},
+			},
+		},
+		{
 			ID: "m365-exchange", Platform: model.PlatformM365, Name: "Exchange Online", DefaultEnabled: false,
 			Description: "Organisation and transport configuration, mail flow rules, connectors, accepted and remote domains, anti-spam, anti-malware, anti-phishing, Safe Links and Safe Attachments, DKIM, sharing and mobile device policies. Off by default: it uses the endpoint behind Exchange Online PowerShell, which Microsoft does not document for direct use.",
 			Sources: []Source{
@@ -251,6 +335,13 @@ func m365Modules() []Module {
 				cmdlet("anti-phish-rules", "Anti-phishing rules", "Get-AntiPhishRule"),
 				cmdlet("safe-attachment-policies", "Safe Attachments policies", "Get-SafeAttachmentPolicy"),
 				cmdlet("safe-links-policies", "Safe Links policies", "Get-SafeLinksPolicy"),
+				cmdlet("safe-attachment-rules", "Safe Attachments rules", "Get-SafeAttachmentRule"),
+				cmdlet("safe-links-rules", "Safe Links rules", "Get-SafeLinksRule"),
+				cmdlet("outbound-spam-rules", "Anti-spam outbound rules", "Get-HostedOutboundSpamFilterRule"),
+				cmdlet("quarantine-policies", "Quarantine policies", "Get-QuarantinePolicy"),
+				cmdlet("preset-eop-rules", "Preset security policies (EOP)", "Get-EOPProtectionPolicyRule"),
+				cmdlet("preset-defender-rules", "Preset security policies (Defender for Office 365)", "Get-ATPProtectionPolicyRule"),
+				cmdlet("built-in-protection", "Built-in protection rule", "Get-ATPBuiltInProtectionRule"),
 				cmdlet("defender-for-office", "Defender for Office 365 settings", "Get-AtpPolicyForO365"),
 				cmdlet("dkim", "DKIM signing", "Get-DkimSigningConfig").ignore("lastChecked", "rotateOnDate", "selectorBeforeRotateOnDate", "selectorAfterRotateOnDate"),
 				cmdlet("sharing-policies", "Sharing policies", "Get-SharingPolicy"),

@@ -21,6 +21,19 @@ import (
 type Store interface {
 	// SyncModules writes the catalogue and the switches this pass uses.
 	SyncModules(ctx context.Context, mods []model.Module, states map[string]model.ModuleState) error
+	// AcquireTenant takes the lease on a tenant for owner, for ttl. It
+	// returns false when another owner holds it, or when another owner
+	// finished the tenant at or after doneSince.
+	AcquireTenant(ctx context.Context, tenantID, owner string, ttl time.Duration, doneSince time.Time) (bool, error)
+	// RenewTenant extends a lease that owner still holds.
+	RenewTenant(ctx context.Context, tenantID, owner string, ttl time.Duration) error
+	// ReleaseTenant gives the lease up; done says the tenant was read.
+	ReleaseTenant(ctx context.Context, tenantID, owner string, done bool) error
+	// RecordHistory adds the changes of a run to the history of each
+	// setting since the baseline.
+	RecordHistory(ctx context.Context, baselineID string, changes []model.Change) error
+	// SaveSnapshot marks a completed run as a point in time.
+	SaveSnapshot(ctx context.Context, s model.Snapshot) error
 	// ModuleSwitches returns the switches set in the dashboard.
 	ModuleSwitches(ctx context.Context) ([]model.ModuleSwitches, error)
 	// ActiveBaseline returns the newest complete baseline, or nil.
@@ -65,10 +78,13 @@ type Memory struct {
 	// run as a line of JSON (-dry-run).
 	Out io.Writer
 
-	Modules map[string]model.Module
-	States  map[string]model.ModuleState
-	Items   map[string]model.Item
-	Changes []model.Change
+	Modules   map[string]model.Module
+	States    map[string]model.ModuleState
+	Items     map[string]model.Item
+	Changes   []model.Change
+	Leases    map[string]Lease
+	History   map[string]model.SettingHistory
+	Snapshots []model.Snapshot
 	// Switches stands for what the dashboard stored in acd_module_settings.
 	Switches  []model.ModuleSwitches
 	Tenants   map[string]model.Tenant
@@ -108,6 +124,89 @@ func (m *Memory) SyncModules(_ context.Context, mods []model.Module, states map[
 		m.Modules[d.ID] = d
 		m.States[d.ID] = states[d.ID]
 	}
+	return nil
+}
+
+// Lease is who reads a tenant, until when, and who read it last.
+type Lease struct {
+	Owner     string
+	ExpiresAt time.Time
+	DoneAt    time.Time
+	DoneBy    string
+}
+
+func (m *Memory) AcquireTenant(_ context.Context, tenantID, owner string, ttl time.Duration, doneSince time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return false, m.Fail
+	}
+	if m.Leases == nil {
+		m.Leases = map[string]Lease{}
+	}
+	now := time.Now()
+	l := m.Leases[tenantID]
+	if l.Owner != "" && l.Owner != owner && l.ExpiresAt.After(now) {
+		return false, nil
+	}
+	if !l.DoneAt.IsZero() && l.DoneBy != owner && !l.DoneAt.Before(doneSince) {
+		return false, nil
+	}
+	l.Owner, l.ExpiresAt = owner, now.Add(ttl)
+	m.Leases[tenantID] = l
+	return true, nil
+}
+
+func (m *Memory) RenewTenant(_ context.Context, tenantID, owner string, ttl time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if l := m.Leases[tenantID]; l.Owner == owner {
+		l.ExpiresAt = time.Now().Add(ttl)
+		m.Leases[tenantID] = l
+	}
+	return nil
+}
+
+func (m *Memory) ReleaseTenant(_ context.Context, tenantID, owner string, done bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if l := m.Leases[tenantID]; l.Owner == owner {
+		l.Owner, l.ExpiresAt = "", time.Time{}
+		if done {
+			l.DoneAt, l.DoneBy = time.Now(), owner
+		}
+		m.Leases[tenantID] = l
+	}
+	return nil
+}
+
+func (m *Memory) RecordHistory(_ context.Context, baselineID string, changes []model.Change) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return m.Fail
+	}
+	if m.History == nil {
+		m.History = map[string]model.SettingHistory{}
+	}
+	for _, h := range model.HistoryOf(baselineID, changes) {
+		old, ok := m.History[h.ID]
+		if ok {
+			h.FirstAt = old.FirstAt
+			h.Changes = append(old.Changes, h.Changes...)
+		}
+		m.History[h.ID] = h
+	}
+	return nil
+}
+
+func (m *Memory) SaveSnapshot(_ context.Context, s model.Snapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Fail != nil {
+		return m.Fail
+	}
+	m.Snapshots = append(m.Snapshots, s)
 	return nil
 }
 

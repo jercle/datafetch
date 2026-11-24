@@ -122,22 +122,54 @@ type IgnoreRule struct {
 // match, without regard to case; at least one of Type, ResourceGroup and
 // Name is set. "*" stands for any text. Without a "*", Type matches as a
 // prefix of the object's type, ResourceGroup and Name exactly.
+//
+// A rule is for every tenant, or with Tenant for one. A tenant's own rules
+// are looked at before the rules for everyone, so a tenant can keep what
+// everyone else leaves out (Include) or leave out more. A rule for
+// everyone that is Enforced is looked at first of all, and no tenant rule
+// changes it.
 type ExcludeRule struct {
+	// Tenant narrows the rule to one tenant, by ID; empty means every tenant.
+	Tenant string `json:"tenant,omitempty"`
 	// Module narrows the rule to one module; empty means every module.
 	Module        string `json:"module,omitempty"`
 	Type          string `json:"type,omitempty"`
 	ResourceGroup string `json:"resourceGroup,omitempty"`
 	Name          string `json:"name,omitempty"`
+	// Include makes the rule an exception: what matches is kept.
+	Include bool `json:"include,omitempty"`
+	// Enforced, on a rule for every tenant: tenants cannot override it.
+	Enforced bool `json:"enforced,omitempty"`
 }
 
-// Excluded reports whether the configuration leaves an object out.
-func (c *Config) Excluded(module, typ, resourceGroup, name string) bool {
-	for _, r := range c.Exclude {
-		if r.Module != "" && r.Module != module {
-			continue
+// Excluded reports whether the configuration leaves an object of a tenant
+// out. The first of these that has a matching rule decides: the enforced
+// rules for everyone, the tenant's own rules, the other rules for
+// everyone. Where rules of one kind disagree, keeping wins.
+func (c *Config) Excluded(tenant, module, typ, resourceGroup, name string) bool {
+	tenant = strings.ToLower(tenant)
+	for level := 0; level < 3; level++ {
+		matched, keep := false, false
+		for _, r := range c.Exclude {
+			var at int
+			switch {
+			case r.Tenant != "":
+				at = 1
+			case r.Enforced:
+				at = 0
+			default:
+				at = 2
+			}
+			if at != level || (r.Tenant != "" && r.Tenant != tenant) || (r.Module != "" && r.Module != module) {
+				continue
+			}
+			if like(r.Type, typ, true) && like(r.ResourceGroup, resourceGroup, false) && like(r.Name, name, false) {
+				matched = true
+				keep = keep || r.Include
+			}
 		}
-		if like(r.Type, typ, true) && like(r.ResourceGroup, resourceGroup, false) && like(r.Name, name, false) {
-			return true
+		if matched {
+			return !keep
 		}
 	}
 	return false
@@ -264,6 +296,15 @@ type Endpoints struct {
 	GraphScope    string
 	Exchange      string
 	ExchangeScope string
+	// Defender is the Microsoft Defender for Endpoint API; empty where the
+	// cloud has none.
+	Defender      string
+	DefenderScope string
+	// PowerPlatform is the Power Platform admin (BAP) API; SharePoint the
+	// domain SharePoint Online sites are under. Empty where not known.
+	PowerPlatform      string
+	PowerPlatformScope string
+	SharePoint         string
 }
 
 var clouds = map[string]Endpoints{
@@ -272,18 +313,24 @@ var clouds = map[string]Endpoints{
 		"https://management.azure.com", "https://management.azure.com/.default",
 		"https://graph.microsoft.com", "https://graph.microsoft.com/.default",
 		"https://outlook.office365.com", "https://outlook.office365.com/.default",
+		"https://api.securitycenter.microsoft.com", "https://api.securitycenter.microsoft.com/.default",
+		"https://api.bap.microsoft.com", "https://service.powerapps.com/.default", "sharepoint.com",
 	},
 	"usgovernment": {
 		"https://login.microsoftonline.us",
 		"https://management.usgovcloudapi.net", "https://management.usgovcloudapi.net/.default",
 		"https://graph.microsoft.us", "https://graph.microsoft.us/.default",
 		"https://outlook.office365.us", "https://outlook.office365.us/.default",
+		"https://api-gov.securitycenter.microsoft.us", "https://api-gov.securitycenter.microsoft.us/.default",
+		"", "", "sharepoint.us",
 	},
 	"china": {
 		"https://login.chinacloudapi.cn",
 		"https://management.chinacloudapi.cn", "https://management.chinacloudapi.cn/.default",
 		"https://microsoftgraph.chinacloudapi.cn", "https://microsoftgraph.chinacloudapi.cn/.default",
 		"https://partner.outlook.cn", "https://partner.outlook.cn/.default",
+		"", "",
+		"", "", "sharepoint.cn",
 	},
 }
 
@@ -406,6 +453,10 @@ func Parse(b []byte, getenv func(string) string, readFile func(string) ([]byte, 
 	for i := range c.Exclude {
 		r := &c.Exclude[i]
 		r.Module = strings.ToLower(strings.TrimSpace(r.Module))
+		r.Tenant = strings.ToLower(strings.TrimSpace(r.Tenant))
+		if r.Tenant != "" && r.Enforced {
+			return nil, fmt.Errorf("config: exclude[%d]: only a rule for every tenant can be enforced", i)
+		}
 		r.Type, r.ResourceGroup, r.Name = strings.ToLower(strings.TrimSpace(r.Type)), strings.ToLower(strings.TrimSpace(r.ResourceGroup)), strings.ToLower(strings.TrimSpace(r.Name))
 		if r.Type == "" && r.ResourceGroup == "" && r.Name == "" {
 			return nil, fmt.Errorf("config: exclude[%d]: give a type, a resource group or a name", i)

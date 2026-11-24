@@ -1,6 +1,6 @@
 # az-config-drift
 
-> **Part of [datafetch](../README.md).** Merged from `jercle/az-config-drift` at `adde807`.
+> **Part of [datafetch](../README.md).** Merged from `jercle/az-config-drift` at `d49f19c`.
 > Run it as `datafetch az-config-drift`. Its settings in Azure App Configuration are
 > under `datafetching.azConfigDrift` and win over the configuration file; how that works,
 > the environment variables and how to build are in the root README.
@@ -80,7 +80,8 @@ datafetch az-config-drift -dry-run -tenant "Contoso Production" -modules m365-co
 | `azure-network` | yes | Everything under `Microsoft.Network`, `Microsoft.Cdn` |
 | `azure-compute` | yes | VMs, scale sets, disks, AKS, container apps, registries, Virtual Desktop, Arc |
 | `azure-data` | yes | Storage, SQL, Cosmos DB, PostgreSQL, MySQL, Redis, Data Factory, Synapse, Databricks, backup vaults |
-| `azure-security` | yes | Key vaults, Defender for Cloud plans, settings, contacts, Sentinel resources |
+| `azure-sentinel` | yes | Per Sentinel workspace: analytics rules, automation rules, data connectors, watchlists, installed solutions, anomaly settings, workspace settings, repository connections, hunting queries and functions |
+| `azure-security` | yes | Key vaults, Defender for Cloud plans, settings, contacts |
 | `azure-monitoring` | yes | Log Analytics, alerts, action groups, data collection rules, Automation, subscription diagnostic settings |
 | `azure-apps` | yes | App Service, API Management, Logic Apps, Service Bus, Event Hubs, Event Grid, AI and IoT services |
 | `azure-other` | yes | **Every resource type no other module reads** |
@@ -93,6 +94,10 @@ datafetch az-config-drift -dry-run -tenant "Contoso Production" -modules m365-co
 | `m365-intune` | yes | Compliance and configuration policies, settings catalogue, administrative templates, endpoint security, enrolment, Autopilot, update profiles, scripts, app protection and configuration |
 | `m365-collaboration` | yes | SharePoint and OneDrive tenant settings, Teams app settings and organisation apps, Microsoft 365 apps and org-wide settings |
 | `m365-information-protection` | yes | Sensitivity labels, label policy settings, retention labels |
+| `m365-sharepoint` | yes | Every SharePoint and OneDrive tenant setting, as `Get-SPOTenant` shows them. Read as the service account |
+| `m365-power-platform` | yes | Power Platform tenant settings, data loss prevention policies, environments |
+| `m365-teams` | no | Teams meeting, messaging, calling and app policies, external and guest access. Needs PowerShell where the collector runs |
+| `m365-defender` | yes | Custom detection rules, Defender for Identity sensors, Defender for Endpoint indicators |
 | `m365-exchange` | no | Organisation and transport configuration, mail flow rules, connectors, domains, anti-spam, anti-malware, anti-phishing, Safe Links, Safe Attachments, DKIM, sharing and device policies |
 
 `datafetch az-config-drift -list-modules` prints all 144 sources with what each
@@ -200,6 +205,142 @@ granted to, under `oauth2PermissionGrants`, with the resource it is for
 named. Reading them needs `Directory.Read.All`; without it the
 applications are stored without that property.
 
+### Microsoft Sentinel
+
+What Sentinel keeps in a workspace is not in Resource Graph, so the
+`azure-sentinel` module reads it from Resource Manager, workspace by
+workspace. Once per pass it lists every Log Analytics workspace the
+collector can see and asks each for its Sentinel onboarding state; the
+ones that are onboarded are read:
+
+| Source | What |
+|---|---|
+| `alert-rules` | Analytics rules of every kind, with their query, schedule, severity, entity mapping and whether they are enabled |
+| `automation-rules` | Automation rules: conditions, actions, order, who changed them (named) |
+| `data-connectors` | The connectors that are set up, and which data types each sends |
+| `watchlists` | Watchlist definitions (not their rows) |
+| `content-packages` | Installed solutions and their versions |
+| `anomaly-settings` | Anomaly detection rules and their thresholds |
+| `settings` | Entity analytics, UEBA, anomalies, Microsoft's data access. Preview API only |
+| `onboarding`, `source-controls` | The onboarding state; repository connections |
+| `saved-searches` | Hunting queries, parsers and functions saved in the workspace |
+| `table-retention` | Per table: interactive and total retention and the plan. The columns are left out |
+
+Rules are titled by their display name. Reader on the subscriptions is
+enough (Microsoft Sentinel Reader also works). Not read: incidents,
+bookmarks, threat intelligence indicators and watchlist rows, which are
+data rather than configuration; and playbooks, which are
+Logic Apps and are in the integration module. Rule templates are not read
+either: they are Microsoft's, not yours.
+
+### Defender XDR
+
+The `m365-defender` module reads what the Defender portal's settings have
+an API for:
+
+| Source | From | Permission |
+|---|---|---|
+| `detection-rules`: custom detection rules, with query, schedule, actions and whether enabled | Microsoft Graph, beta only | `CustomDetection.Read.All` |
+| `identity-sensors`: Defender for Identity sensors and their settings | Microsoft Graph | `SecurityIdentitiesSensors.Read.All` |
+| `indicators`: Defender for Endpoint allow and block indicators | The Defender for Endpoint API | `Ti.Read.All` on **WindowsDefenderATP** |
+
+The Defender for Endpoint API is not Microsoft Graph: its permission is an
+app role of the WindowsDefenderATP application ("APIs my organization
+uses" when adding a permission), and `defender_for_endpoint = true` in
+`deploy/terraform` grants it. Without it the source is reported as denied
+and the rest of the module is read. Indicators that expire, or that a
+threat intelligence feed adds and removes, show as changes; leave them out
+with an exclusion if that is noise.
+
+Defender for Office 365 policies are in the Exchange Online module (off by
+default): anti-phishing, Safe Links and Safe Attachments policies and
+rules, quarantine policies, preset security policies and the built-in
+protection rule. Endpoint security policies for Defender for Endpoint are
+in the Intune module, Defender for Cloud in the Azure Security module.
+
+Not read, because Microsoft publishes no API for it: Defender for Endpoint
+advanced features, device groups and exclusions set in the portal; alert
+suppression and tuning rules; Defender for Identity settings other than
+sensors; Defender for Cloud Apps policies; unified RBAC roles.
+
+### Settings read per resource
+
+Some settings are resources of their own that Resource Graph does not
+index. They are read from Resource Manager once for every resource of a
+type, eight at a time, and named after the resource:
+
+| Source | Module | For every |
+|---|---|---|
+| `resource-diagnostics`: where logs and metrics are sent | Monitoring | key vault, storage account, SQL database, network security group, firewall, application gateway, App Service, AKS cluster and some twenty other types (`DiagnosticTypes` in `internal/catalog/azure.go`) |
+| `storage-blob-settings`, `storage-file-settings`: soft delete, versioning, change feed, CORS, SMB settings | Storage and data | storage account |
+| `sql-auditing`, `sql-firewall-rules` | Storage and data | SQL server |
+| `app-site-config`, `app-auth-settings`: TLS version, FTP, remote debugging, sign-in settings (without secrets) | Apps and integration | App Service and function app |
+
+That is one request per resource per source and pass, so a large estate
+adds minutes: switch a source off under Modules if it is not worth it.
+`budgets` (Governance) is read per subscription; what has been spent so
+far is left out.
+
+### SharePoint, Power Platform and Teams
+
+These have neither Microsoft Graph nor Resource Manager behind them.
+
+**SharePoint Online** (`m365-sharepoint`): the tenant object of the admin
+site (`https://<tenant>-admin.sharepoint.com/_api/SPO.Tenant`), which is
+what `Get-SPOTenant` returns. SharePoint refuses the token an application
+gets with a client secret, so the source is read as the tenant's **service
+account**, which needs the SharePoint Administrator role; set `username`
+and `password` on the tenant. The admin site's address is taken from the
+tenant's initial domain.
+
+**Power Platform** (`m365-power-platform`): tenant settings, DLP policies
+and environments from the admin API (`api.bap.microsoft.com`). The
+collector's application must be registered once as a Power Platform
+management application, by a Power Platform administrator:
+`New-PowerAppManagementApp -ApplicationId <client id>` (module
+Microsoft.PowerApps.Administration.PowerShell). Public cloud only.
+
+**Microsoft Teams** (`m365-teams`, off by default): the policies only the
+MicrosoftTeams PowerShell module exposes. The collector embeds a script
+(`internal/collector/scripts/teams.ps1`) and runs it with `pwsh`, once per
+tenant and pass for all sixteen cmdlets, handing it two access tokens in
+its environment (never on the command line). It needs:
+
+- PowerShell 7 and the MicrosoftTeams module where the collector runs:
+  `Dockerfile.pwsh` in the repository root builds an image with both. Without them the sources
+  are reported as unsupported and nothing else is affected.
+- For the collector's application: the Teams Administrator or Global
+  Reader directory role, and the Microsoft Graph application permissions
+  the module asks for when connecting as an application (see Microsoft's
+  "Application-based authentication in Teams PowerShell module").
+
+Connecting takes tens of seconds per tenant. A new version of the module
+can add or rename properties, which shows as a change to every policy:
+pin the version in the image.
+
+### Objects inside other objects
+
+Some things are only meaningful as part of something else, and are stored
+there instead of as objects of their own:
+
+- **Extensions** of virtual machines, scale sets and Arc machines are in
+  the machine's `extensions`.
+- **Delegated permission grants** are in the enterprise application or
+  managed identity they were granted to (above).
+- **Roles** are in the principal that holds them: every enterprise
+  application, managed identity and app registration has `directoryRoles`
+  and `azureRoles`, each role and scope named. An app registration's are
+  those of its service principal in the tenant. A role being granted or
+  taken away is therefore a change to that application.
+- **Roles by principal** (Microsoft 365 > Roles) is one object per user,
+  group or application that holds any directory or Azure role, with all of
+  them: the dashboard's "Roles by principal" tab. Only active assignments;
+  eligible (PIM) ones are in their own source. Directory roles need
+  `RoleManagement.Read.Directory`, Azure roles Reader; a tenant collected
+  for one platform only gets that half.
+
+Custom role definitions are titled by their role name.
+
 ### Leaving objects out
 
 `exclude` lists objects that should not be checked at all: the network
@@ -215,6 +356,23 @@ leave out") or in the file:
 ]
 ```
 
+A rule is for every tenant, or with `"tenant": "<tenant id>"` for one. The
+first of these with a matching rule decides, so both directions of
+override exist:
+
+1. rules for every tenant with `"enforced": true`: no tenant changes them;
+2. the tenant's own rules, where `"include": true` keeps what the rules
+   for everyone leave out;
+3. the other rules for every tenant.
+
+```json
+"exclude": [
+  { "type": "microsoft.network/networkwatchers" },
+  { "tenant": "<tenant id>", "type": "microsoft.network/networkwatchers", "include": true },
+  { "type": "microsoft.insights/", "enforced": true }
+]
+```
+
 An object is left out when every field of a rule matches, in any letter
 case: `type` by how the type starts, `resourceGroup` and `name` exactly,
 and `*` stands for any text in all three. `module` narrows a rule to one
@@ -226,12 +384,59 @@ property rather than an object, use `ignore`.
 
 The pass after an upgrade that changes what a source stores records those
 differences as changes, once. With this version: enterprise applications
-gain `oauth2PermissionGrants`, managed identities move from "Enterprise
+gain `oauth2PermissionGrants`, applications and service principals gain
+`directoryRoles` and `azureRoles`, machines gain `extensions` while the
+extensions themselves are recorded as removed, managed identities move from "Enterprise
 applications" to a source of their own (removed there, added here), and
 the objects of the former "Delegated permission grants" source are
 deleted. Save a new baseline afterwards. Objects of any source that is no
 longer in the catalogue, such as an extra source taken out of the
 configuration, are deleted at the next pass.
+
+## Replicas
+
+Any number of collectors can run against the same database. Before reading
+a tenant, a collector takes that tenant's lease (`acd_leases`); a tenant
+whose lease another collector holds is left to it, and so is one another
+collector finished after this collector's pass began, or (with `-loop`)
+less than half an interval ago. A tenant is therefore never read by two
+collectors at once, nor twice in a round. A pass asked for from the
+dashboard is not held back by the half-interval rule.
+
+Leases last three heartbeats (at least two minutes) and are renewed while
+the tenant is read, so the tenants of a collector that died are picked up
+by another after that long. A collector that is stopped (SIGTERM) releases
+its leases. In the run record a tenant left to another collector has the
+status `skipped`, which does not make the pass partial.
+
+`deploy/README.md` has the deployment for each place the collector can
+run: Docker Compose on one machine, Azure Container Apps (Terraform), and
+Kubernetes (kustomize, Terraform for the Azure side, Argo CD).
+
+## Snapshots and history
+
+Every completed run leaves a **snapshot** (`acd_snapshots`): the point in
+time, the baseline in force, and how many objects and settings changed in
+that run. And every change is added to the **history** of its setting
+(`acd_history`), one document per setting of an object that has changed
+since the baseline was saved:
+
+```json
+{ "itemId": "…", "name": "vnet-a", "path": "tags.env", "baselineId": "…",
+  "firstAt": "2026-11-01T10:09:00Z", "lastAt": "2026-11-01T10:19:00Z",
+  "changes": [
+    { "runId": "…", "at": "2026-11-01T10:09:00Z", "kind": "changed", "before": "\"dev\"", "after": "\"test\"" },
+    { "runId": "…", "at": "2026-11-01T10:19:00Z", "kind": "changed", "before": "\"test\"", "after": "\"prod\"" }
+  ] }
+```
+
+A setting that changes again gets another entry; when it first changed is
+kept. An object added or removed has the path `""`. The history as of a
+snapshot is the entries up to its time, which is how the dashboard's
+History tab shows what had changed by any run and how that differs from
+the most recent capture. A new baseline starts a new history; the old one
+stays for its snapshots. A change with more settings than
+`limits.changePaths` records that many.
 
 ## Baselines and drift
 
@@ -411,21 +616,24 @@ into cloudini; the field and the command there are yours to add.
 
 ## Modules and the dashboard
 
-The switches are kept in MongoDB, in `acd_module_settings`: one document
-per module, holding only the switches someone set in the dashboard.
+The switches are kept in MongoDB, in `acd_module_settings`, holding only
+the switches someone set in the dashboard. A document is the default for
+every tenant (`_id` is the module) or one tenant's own (`_id`
+`<tenant id>/<module>`):
 
 ```json
-{ "_id": "m365-identity", "enabled": true,
-  "sources": { "ca-policies": { "enabled": true, "beta": false, "delegated": true } },
-  "updatedAt": "…", "updatedBy": "ann@contoso.com" }
+{ "_id": "m365-identity", "enabled": true, "enforced": false,
+  "sources": { "ca-policies": { "enabled": true, "beta": false, "delegated": true } } }
+{ "_id": "<tenant id>/m365-identity", "tenantId": "<tenant id>", "module": "m365-identity", "enabled": false }
 ```
 
-Before every pass the collector reads them and, switch by switch, uses the
-first of: this collection, the configuration (`modules` in the file, or
-the `modules.*` keys an earlier version wrote to App Configuration), the
-catalogue's default. If the collection cannot be read the pass does not
-start, so that a module that was switched off is never collected by
-mistake.
+Before every pass the collector reads them and, switch by switch and tenant
+by tenant, uses the first of: the tenant's own document (unless the
+default has `enforced: true`), the default document, the configuration
+(`modules` in the file, or the `modules.*` keys an earlier version wrote
+to App Configuration), the catalogue's default. If the collection cannot
+be read the pass does not start, so that a module that was switched off is
+never collected by mistake.
 
 Earlier versions kept the switches in App Configuration. The first time
 the Modules page opens with nothing in `acd_module_settings`, the dashboard
@@ -536,6 +744,8 @@ Database `azconfigdrift` by default.
 | Collection | One document per | Written by |
 |---|---|---|
 | `acd_modules` | module | collector: the catalogue and the switches the last pass used |
+| `acd_leases` | tenant | collector: who is reading it, and who finished it when |
+| `acd_history`, `acd_snapshots` | setting changed since the baseline; completed run | collector |
 | `acd_module_settings` | module | dashboard: the module and source switches. Read by the collector before every pass |
 | `acd_tenants` | tenant: outcome of each module and source | collector |
 | `acd_items` | configuration object | collector; dashboard resets `drift` when a baseline is saved |

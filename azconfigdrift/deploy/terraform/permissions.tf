@@ -61,6 +61,9 @@ variable "graph_permissions" {
     "DeviceManagementApps.Read.All",
     "DeviceManagementRBAC.Read.All",
     "DeviceManagementManagedDevices.Read.All",
+    # m365-defender
+    "CustomDetection.Read.All",
+    "SecurityIdentitiesSensors.Read.All",
     # m365-collaboration
     "SharePointTenantSettings.Read.All",
     "TeamworkAppSettings.Read.All",
@@ -88,7 +91,7 @@ variable "delegated_permissions" {
 }
 
 variable "app_configuration_id" {
-  description = "Resource ID of the Azure App Configuration store that holds the collector's settings (under azureDriftChecker), when the collector reads it with this same service principal. Leave empty when it signs in to the store as something else, or is handed its settings by cloudini."
+  description = "Resource ID of the Azure App Configuration store that holds the collector's settings (under datafetching.azConfigDrift), when the collector reads it with this same service principal. Leave empty when it signs in to the store as something else, or is handed its settings by cloudini."
   type        = string
   default     = ""
 }
@@ -139,6 +142,26 @@ resource "azuread_service_principal_delegated_permission_grant" "graph" {
   service_principal_object_id          = var.collector_object_id
   resource_service_principal_object_id = data.azuread_service_principal.graph.object_id
   claim_values                         = var.delegated_permissions
+}
+
+# Defender for Endpoint indicators are read from its own API, whose
+# permissions are app roles of the WindowsDefenderATP application.
+variable "defender_for_endpoint" {
+  description = "Also grant Ti.Read.All on the Defender for Endpoint API (WindowsDefenderATP), for the indicators source of the Defender XDR module. Needs a tenant with Defender for Endpoint."
+  type        = bool
+  default     = false
+}
+
+data "azuread_service_principal" "defender" {
+  count        = var.defender_for_endpoint ? 1 : 0
+  display_name = "WindowsDefenderATP"
+}
+
+resource "azuread_app_role_assignment" "defender" {
+  count               = var.defender_for_endpoint ? 1 : 0
+  app_role_id         = data.azuread_service_principal.defender[0].app_role_ids["Ti.Read.All"]
+  principal_object_id = var.collector_object_id
+  resource_object_id  = data.azuread_service_principal.defender[0].object_id
 }
 
 data "azuread_service_principal" "exchange" {

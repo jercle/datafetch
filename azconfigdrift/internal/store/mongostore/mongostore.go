@@ -99,6 +99,70 @@ func (s *Store) SyncModules(ctx context.Context, mods []model.Module, states map
 	return nil
 }
 
+func (s *Store) AcquireTenant(ctx context.Context, tenantID, owner string, ttl time.Duration, doneSince time.Time) (bool, error) {
+	now := time.Now().UTC()
+	// Free (never held, released or expired) or already ours, and not just
+	// finished by someone else. When the document exists and does not
+	// match, the upsert collides with it: that is "held".
+	filter := bson.D{{Key: "_id", Value: tenantID},
+		{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "owner", Value: owner}}, bson.D{{Key: "owner", Value: ""}}, bson.D{{Key: "expiresAt", Value: bson.D{{Key: "$lt", Value: now}}}},
+			}}},
+			bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "doneBy", Value: owner}}, bson.D{{Key: "doneAt", Value: nil}}, bson.D{{Key: "doneAt", Value: bson.D{{Key: "$lt", Value: doneSince.UTC()}}}},
+			}}},
+		}},
+	}
+	_, err := s.coll(model.CollLeases).UpdateOne(ctx, filter, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "owner", Value: owner}, {Key: "expiresAt", Value: now.Add(ttl)}, {Key: "acquiredAt", Value: now},
+	}}}, options.UpdateOne().SetUpsert(true))
+	if mongo.IsDuplicateKeyError(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *Store) RenewTenant(ctx context.Context, tenantID, owner string, ttl time.Duration) error {
+	_, err := s.coll(model.CollLeases).UpdateOne(ctx, bson.D{{Key: "_id", Value: tenantID}, {Key: "owner", Value: owner}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "expiresAt", Value: time.Now().UTC().Add(ttl)}}}})
+	return err
+}
+
+func (s *Store) ReleaseTenant(ctx context.Context, tenantID, owner string, done bool) error {
+	set := bson.D{{Key: "owner", Value: ""}, {Key: "expiresAt", Value: time.Unix(0, 0).UTC()}}
+	if done {
+		set = append(set, bson.E{Key: "doneAt", Value: time.Now().UTC()}, bson.E{Key: "doneBy", Value: owner})
+	}
+	_, err := s.coll(model.CollLeases).UpdateOne(ctx, bson.D{{Key: "_id", Value: tenantID}, {Key: "owner", Value: owner}}, bson.D{{Key: "$set", Value: set}})
+	return err
+}
+
+func (s *Store) RecordHistory(ctx context.Context, baselineID string, changes []model.Change) error {
+	for _, h := range model.HistoryOf(baselineID, changes) {
+		_, err := s.coll(model.CollHistory).UpdateOne(ctx, bson.D{{Key: "_id", Value: h.ID}}, bson.D{
+			// Who and what it is, and when it first changed, are kept from
+			// the first time; each later change is added to the list.
+			{Key: "$setOnInsert", Value: bson.D{
+				{Key: "baselineId", Value: h.BaselineID}, {Key: "itemId", Value: h.ItemID}, {Key: "tenantId", Value: h.TenantID}, {Key: "tenantName", Value: h.TenantName},
+				{Key: "platform", Value: h.Platform}, {Key: "module", Value: h.Module}, {Key: "source", Value: h.Source}, {Key: "type", Value: h.Type},
+				{Key: "path", Value: h.Path}, {Key: "firstAt", Value: h.FirstAt},
+			}},
+			{Key: "$set", Value: bson.D{{Key: "name", Value: h.Name}, {Key: "lastAt", Value: h.LastAt}}},
+			{Key: "$push", Value: bson.D{{Key: "changes", Value: h.Changes[0]}}},
+		}, options.UpdateOne().SetUpsert(true))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) SaveSnapshot(ctx context.Context, snap model.Snapshot) error {
+	_, err := s.coll(model.CollSnapshots).ReplaceOne(ctx, bson.D{{Key: "_id", Value: snap.ID}}, snap, options.Replace().SetUpsert(true))
+	return err
+}
+
 func (s *Store) ModuleSwitches(ctx context.Context) ([]model.ModuleSwitches, error) {
 	cur, err := s.coll(model.CollModuleSettings).Find(ctx, bson.D{})
 	if err != nil {
@@ -362,6 +426,9 @@ func indexes(r Retention) []index {
 		{model.CollChanges, "item", keys("itemId", 1, "at", -1), 0},
 		{model.CollChanges, "module", keys("module", 1, "at", -1), 0},
 		{model.CollChanges, "ttl", keys("at", 1), r.ChangesDays},
+		{model.CollHistory, "baseline", keys("baselineId", 1, "lastAt", -1), 0},
+		{model.CollHistory, "item", keys("itemId", 1, "baselineId", 1), 0},
+		{model.CollSnapshots, "time", keys("at", -1), 0},
 		{model.CollBaselines, "created", keys("status", 1, "createdAt", -1), 0},
 		{model.CollBaselineItems, "source", keys("baselineId", 1, "tenantId", 1, "module", 1, "source", 1), 0},
 		{model.CollBaselineItems, "item", keys("baselineId", 1, "itemId", 1), 0},

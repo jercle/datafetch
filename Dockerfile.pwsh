@@ -1,0 +1,29 @@
+# datafetch with PowerShell 7 and the MicrosoftTeams module, for
+# az-config-drift's Microsoft Teams policies module. The plain Dockerfile is
+# a tenth of the size; use this one only if you switch that module on.
+#   docker build -f Dockerfile.pwsh -t <registry>/datafetch:<tag>-pwsh .
+ARG GO_VERSION=1.27.4
+FROM golang:${GO_VERSION} AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags "-s -w -X github.com/jercle/datafetch/internal/version.Version=${VERSION}" \
+    -o /out/datafetch ./cmd/datafetch
+
+FROM mcr.microsoft.com/powershell:lts-debian-12
+# Pin the module version you have tested: a new one can rename properties,
+# which would show as drift on every policy.
+ARG TEAMS_MODULE_VERSION=
+RUN pwsh -NoLogo -NoProfile -Command "\
+    \$ErrorActionPreference = 'Stop'; \
+    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+    if ('${TEAMS_MODULE_VERSION}') { Install-Module MicrosoftTeams -Scope AllUsers -RequiredVersion '${TEAMS_MODULE_VERSION}' } \
+    else { Install-Module MicrosoftTeams -Scope AllUsers }"
+COPY --from=build /out/datafetch /datafetch
+RUN useradd --system --uid 65532 --create-home collector
+USER collector
+ENV POWERSHELL_TELEMETRY_OPTOUT=1
+ENTRYPOINT ["/datafetch"]
