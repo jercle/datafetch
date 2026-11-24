@@ -129,7 +129,7 @@ docker build -t datafetch --build-arg VERSION=1.2.3 .
 ```
 
 The image's entry point is `datafetch`: the tool is the first argument
-(`args: ["mde-tracker", "-once"]`). `go.mod` asks for Go 1.24 or later.
+(`args: ["mde-tracker", "-once"]`). `go.mod` asks for Go 1.27.4 or later.
 
 ## Moving from the separate repositories
 

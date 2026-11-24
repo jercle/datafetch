@@ -1,7 +1,7 @@
 # One image for every tool: the tool is the first argument.
 #   docker build -t datafetch --build-arg VERSION=1.2.3 .
 #   docker run datafetch az-storage -loop
-ARG GO_VERSION=1.27
+ARG GO_VERSION=1.27.4
 FROM golang:${GO_VERSION} AS build
 WORKDIR /src
 COPY go.mod go.sum ./
