@@ -1,0 +1,25 @@
+[Unit]
+Description=sxg-check: health checks on Sophos XG firewalls and their web proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sxgcheck
+Group=sxgcheck
+# SXGCHECK_MONGO_URI and the secrets named by communityEnv, passwordEnv...
+# For the settings under datafetching.sxgCheck in Azure App Configuration, the
+# same file has AZURE_APPCONFIG_ENDPOINT and AZURE_APPCONFIG_TENANT_ID,
+# _CLIENT_ID and _CLIENT_SECRET (or AZURE_APPCONFIG_MANAGED_IDENTITY). The
+# configuration file is then optional.
+EnvironmentFile=/etc/sxg-check/env
+ExecStart=/usr/local/bin/datafetch sxg-check -loop -config /etc/sxg-check/config.json
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,67 @@
+{
+  "mongo": {
+    "uri": "mongodb://azconfigdrift:CHANGE-ME@mongo.example.internal:27017/?authSource=admin&tls=true",
+    "database": "azconfigdrift",
+    "ensureIndexes": true
+  },
+  "interval": "6h",
+  "heartbeatInterval": "30s",
+  "concurrency": { "tenants": 2, "modules": 3 },
+  "retention": { "logsDays": 30, "runsDays": 90, "changesDays": 365 },
+  "logging": { "level": "info", "mongoLevel": "info", "format": "text" },
+
+  "tenants": [
+    {
+      "tenantName": "Contoso Production",
+      "tenantId": "00000000-0000-0000-0000-000000000000",
+      "clientId": "11111111-1111-1111-1111-111111111111",
+      "clientSecretEnv": "AZCONFIGDRIFT_CONTOSO_SECRET",
+      "username": "svc-config-drift@contoso.onmicrosoft.com",
+      "passwordEnv": "AZCONFIGDRIFT_CONTOSO_PASSWORD"
+    },
+    {
+      "tenantName": "Fabrikam",
+      "tenantId": "22222222-2222-2222-2222-222222222222",
+      "clientId": "33333333-3333-3333-3333-333333333333",
+      "clientSecretEnv": "AZCONFIGDRIFT_FABRIKAM_SECRET",
+      "platforms": ["azure"],
+      "excludeSubscriptions": ["44444444-4444-4444-4444-444444444444"]
+    }
+  ],
+
+  "modules": {
+    "m365-exchange": { "enabled": false },
+    "m365-intune": { "sources": { "assigned-apps": { "enabled": false }, "settings-catalog": { "beta": true } } }
+  },
+  "skipSources": ["m365-collaboration/dynamics-voice"],
+
+  "ignore": [
+    { "type": "microsoft.web/sites", "paths": ["properties.outboundIpAddresses", "properties.possibleOutboundIpAddresses"] },
+    { "module": "m365-applications", "paths": ["signInAudience"] }
+  ],
+
+  "exclude": [
+    { "module": "azure-network", "type": "microsoft.network/networkwatchers" },
+    { "resourceGroup": "mc_*" }
+  ],
+
+  "extraSources": [
+    {
+      "module": "azure-governance",
+      "id": "budgets",
+      "name": "Budgets",
+      "kind": "arm",
+      "path": "/subscriptions/{subscriptionId}/providers/Microsoft.Consumption/budgets?api-version=2023-05-01"
+    },
+    {
+      "module": "m365-identity",
+      "id": "b2c-user-flows",
+      "name": "External ID user flows",
+      "kind": "graph",
+      "path": "/identity/authenticationEventsFlows",
+      "permission": "EventListener.Read.All"
+    }
+  ],
+
+  "limits": { "maxItemBytes": 4194304, "changePaths": 100, "sourceTimeout": "2h" }
+}

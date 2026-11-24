@@ -1,0 +1,52 @@
+Return-Path: <dmarc-noreply@reports.example.net>
+From: "DMARC Reporter" <dmarc-noreply@reports.example.net>
+To: dmarc-ruf@contoso.com.au
+Subject: Report Domain: contoso.com.au Submitter: example.net Report-ID: <abc123>
+Date: Mon, 16 Nov 2026 01:02:03 +0000
+Message-ID: <report-abc123@reports.example.net>
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=feedback-report;
+	boundary="==BOUNDARY=="
+
+--==BOUNDARY==
+Content-Type: text/plain; charset="US-ASCII"
+Content-Transfer-Encoding: 7bit
+
+This is an authentication failure report for an email message received from
+IP 203.0.113.45 on Mon, 16 Nov 2026 00:58:12 +0000.
+
+--==BOUNDARY==
+Content-Type: message/feedback-report
+
+Feedback-Type: auth-failure
+User-Agent: ExampleMTA/2.1
+Version: 1
+Original-Mail-From: <bounce@spoofy.example.org>
+Original-Rcpt-To: <victim@example.net>
+Arrival-Date: Mon, 16 Nov 2026 00:58:12 +0000
+Reporting-MTA: dns; mx1.example.net
+Source-IP: 203.0.113.45
+Reported-Domain: contoso.com.au
+Authentication-Results: mx1.example.net; dmarc=fail (p=reject sp=reject dis=reject) header.from=contoso.com.au;
+ spf=fail (sender IP is 203.0.113.45) smtp.mailfrom=bounce@spoofy.example.org;
+ dkim=fail (bad signature) header.d=contoso.com.au header.s=selector1
+Auth-Failure: dmarc
+Delivery-Result: reject
+DKIM-Domain: contoso.com.au
+DKIM-Selector: selector1
+Identity-Alignment: none
+
+--==BOUNDARY==
+Content-Type: message/rfc822
+Content-Transfer-Encoding: base64
+
+UmVjZWl2ZWQ6IGZyb20gc3Bvb2Z5LmV4YW1wbGUub3JnIChtYWlsLnNwb29meS5leGFtcGxlLm9y
+ZyBbMjAzLjAuMTEzLjQ1XSkKCWJ5IG14MS5leGFtcGxlLm5ldCB3aXRoIEVTTVRQIGlkIDEyMzQ1
+Cglmb3IgPHZpY3RpbUBleGFtcGxlLm5ldD47IE1vbiwgMTYgTm92IDIwMjYgMDA6NTg6MTIgKzAw
+MDAKRnJvbTogIkNvbnRvc28gUGF5cm9sbCIgPHBheXJvbGxAY29udG9zby5jb20uYXU+ClRvOiB2
+aWN0aW1AZXhhbXBsZS5uZXQKU3ViamVjdDogPT9VVEYtOD9CP1ZYSm5aVzUwT2lCcGJuWnZhV05s
+SUc5MlpYSmtkV1U9Pz0KRGF0ZTogTW9uLCAxNiBOb3YgMjAyNiAxMTo1ODowMCArMTEwMApNZXNz
+YWdlLUlEOiA8ZmFrZS05OTlAc3Bvb2Z5LmV4YW1wbGUub3JnPgpES0lNLVNpZ25hdHVyZTogdj0x
+OyBhPXJzYS1zaGEyNTY7IGQ9Y29udG9zby5jb20uYXU7IHM9c2VsZWN0b3IxOyBiaD1hYmM9OyBi
+PWRlZj0KWC1NYWlsZXI6IFBIUE1haWxlciA2LjAKCltib2R5IHJlZGFjdGVkXQo=
+--==BOUNDARY==--

@@ -1,0 +1,25 @@
+[Unit]
+Description=az-config-drift: Azure and Microsoft 365 configuration snapshots and drift
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=azconfigdrift
+Group=azconfigdrift
+# AZURE_APPCONFIG_ENDPOINT with AZURE_APPCONFIG_TENANT_ID, _CLIENT_ID and
+# _CLIENT_SECRET (or AZURE_APPCONFIG_MANAGED_IDENTITY) and optionally
+# AZURE_APPCONFIG_LABEL: where the settings made in the dashboard are read
+# from. AZCONFIGDRIFT_MONGO_URI and the secrets named by clientSecretEnv,
+# for what the configuration file still supplies.
+EnvironmentFile=/etc/az-config-drift/env
+ExecStart=/usr/local/bin/datafetch az-config-drift -loop -config /etc/az-config-drift/config.json
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

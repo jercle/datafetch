@@ -1,0 +1,25 @@
+[Unit]
+Description=ns-check: Citrix NetScaler health checks
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nscheck
+Group=nscheck
+# NSCHECK_MONGO_URI and the passwords named by passwordEnv.
+# For the settings under datafetching.nsCheck in Azure App Configuration, the
+# same file has AZURE_APPCONFIG_ENDPOINT and AZURE_APPCONFIG_TENANT_ID,
+# _CLIENT_ID and _CLIENT_SECRET (or AZURE_APPCONFIG_MANAGED_IDENTITY). The
+# configuration file is then optional.
+EnvironmentFile=/etc/ns-check/env
+ExecStart=/usr/local/bin/datafetch ns-check -loop -config /etc/ns-check/config.json
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

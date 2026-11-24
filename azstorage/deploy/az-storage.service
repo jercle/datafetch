@@ -1,0 +1,25 @@
+[Unit]
+Description=az-storage: Azure storage account, blob container and managed disk inventory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=azstorage
+Group=azstorage
+# AZSTORAGE_MONGO_URI and the secrets named by clientSecretEnv.
+# For the settings under datafetching.azStorage in Azure App Configuration, the
+# same file has AZURE_APPCONFIG_ENDPOINT and AZURE_APPCONFIG_TENANT_ID,
+# _CLIENT_ID and _CLIENT_SECRET (or AZURE_APPCONFIG_MANAGED_IDENTITY). The
+# configuration file is then optional.
+EnvironmentFile=/etc/az-storage/env
+ExecStart=/usr/local/bin/datafetch az-storage -loop -config /etc/az-storage/config.json
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+# Runs one collection every 6 hours (-once). Uses workload identity for tenants
+# configured with "type": "workload"; secrets for the rest come from mde-collector-secrets.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mde-collector
+spec:
+  schedule: "17 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            azure.workload.identity/use: "true"
+        spec:
+          serviceAccountName: mde-collector
+          restartPolicy: Never
+          containers:
+            - name: mde-collector
+              image: myregistry.azurecr.io/datafetch:latest
+              args: ["mde-tracker", "-once"]
+              env:
+                - name: MDE_CONFIG
+                  value: /config/config.json
+              envFrom:
+                - secretRef:
+                    # MONGODB_URI, CONTOSO_MDE_SECRET, ... and, for the settings under
+                    # datafetching.mdeTracker, AZURE_APPCONFIG_ENDPOINT with its credentials.
+                    name: mde-collector-secrets
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+                  readOnly: true
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 512Mi }
+          volumes:
+            - name: config
+              configMap:
+                name: mde-collector-config # key: config.json
