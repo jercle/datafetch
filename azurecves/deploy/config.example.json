@@ -1,0 +1,29 @@
+{
+  "tenants": [
+    {
+      "tenantName": "Contoso",
+      "tenantId": "00000000-0000-0000-0000-000000000000",
+      "clientId": "11111111-1111-1111-1111-111111111111",
+      "clientSecret": "prefer AZCVES_TENANTS or AZCVES_TENANTS_FILE over putting secrets here"
+    }
+  ],
+  "mongo": { "uri": "mongodb://localhost:27017", "database": "azcves" },
+  "interval": "6h",
+  "tenantConcurrency": 4,
+  "disable": [],
+  "defenderPageSize": 50000,
+  "cveDetailsEvery": "24h",
+  "deviceGroups": [
+    { "name": "GCP", "hidden": true, "cidrs": ["10.128.0.0/9"], "names": ["gke-*"], "cloudProviders": ["GCP"] },
+    { "name": "AWS", "hidden": true, "cidrs": ["172.31.0.0/16"], "names": ["ip-*.ec2.internal"], "cloudProviders": ["AWS"] }
+  ],
+  "defaultDeviceGroup": "Azure",
+  "defaultDeviceGroupHidden": false,
+  "hostnameFallback": true,
+  "matchByHostname": false,
+  "progressEvery": "1m",
+  "resolveImageTags": true,
+  "storeProperties": false,
+  "costs": { "enabled": true, "database": "azcost", "collection": "resource_costs", "costType": "actual" },
+  "monitoring": { "enabled": true, "logLevel": "info", "logRetentionDays": 30, "runRetentionDays": 180 }
+}

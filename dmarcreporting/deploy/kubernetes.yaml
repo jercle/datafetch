@@ -1,0 +1,65 @@
+# Long-running collector with AKS workload identity. If you'd rather run it as
+# a CronJob, use `args: ["dmarc-reporting", "-once"]` in a CronJob and drop the probes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dmarc-collector
+  annotations:
+    azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dmarc-collector
+spec:
+  replicas: 1 # keep at 1: the mailbox is the queue
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: dmarc-collector }
+  template:
+    metadata:
+      labels:
+        app: dmarc-collector
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: dmarc-collector
+      securityContext: { runAsNonRoot: true }
+      containers:
+        - name: collector
+          image: ghcr.io/jercle/datafetch:latest
+          args: ["dmarc-reporting"]
+          envFrom:
+            - configMapRef: { name: dmarc-collector }
+            - secretRef: { name: dmarc-collector } # MONGODB_URI, IPINFO_TOKEN
+          ports: [{ containerPort: 8080, name: health }]
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 60
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: geoip, mountPath: /geoip, readOnly: true }
+      volumes:
+        - name: geoip
+          persistentVolumeClaim: { claimName: geoip } # kept fresh by maxmindinc/geoipupdate
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dmarc-collector
+data:
+  AZURE_TENANT_ID: "00000000-0000-0000-0000-000000000000"
+  DMARC_MAILBOX: dmarc-reports@contoso.com.au
+  DMARC_SOURCE_FOLDER: Inbox
+  DMARC_POST_PROCESS: move
+  DMARC_POLL_INTERVAL: 5m
+  MONGODB_DATABASE: dmarc
+  GEOIP_CITY_DB: /geoip/GeoLite2-City.mmdb
+  GEOIP_ASN_DB: /geoip/GeoLite2-ASN.mmdb
+  # For the settings under datafetching.dmarcReporting in Azure App
+  # Configuration, which win over these variables (credentials go in the Secret):
+  # AZURE_APPCONFIG_ENDPOINT: https://<store>.azconfig.io

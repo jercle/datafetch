@@ -1,0 +1,20 @@
+# Builds
+/datafetch
+/datafetch.exe
+/dist/
+
+# Local configuration and secrets
+/*.json
+config.json
+tenants.json
+.env
+.env.*
+*.pem
+*.pfx
+
+# Data and troubleshooting output
+*.mmdb
+*.log
+dump/
+unparsed/
+.DS_Store

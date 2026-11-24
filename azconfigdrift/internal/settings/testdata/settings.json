@@ -1,0 +1,95 @@
+[
+	{
+		"key": "concurrency.tenants",
+		"value": "4",
+		"contentType": "application/json"
+	},
+	{
+		"key": "exclude",
+		"value": "[{\"module\":\"azure-network\",\"type\":\"microsoft.network/networkwatchers\"},{\"resourceGroup\":\"mc_*\"}]",
+		"contentType": "application/json"
+	},
+	{
+		"key": "extraSources",
+		"value": "[{\"module\":\"azure-governance\",\"id\":\"budgets\",\"name\":\"Budgets\",\"kind\":\"arm\",\"path\":\"/subscriptions/{subscriptionId}/providers/Microsoft.Consumption/budgets?api-version=2023-05-01\"}]",
+		"contentType": "application/json"
+	},
+	{
+		"key": "ignore",
+		"value": "[{\"paths\":[\"properties.state\"],\"type\":\"microsoft.web/sites\"},{\"paths\":[\"signInAudience\"],\"module\":\"m365-applications\"}]",
+		"contentType": "application/json"
+	},
+	{
+		"key": "interval",
+		"value": "30m"
+	},
+	{
+		"key": "modules.m365-exchange.enabled",
+		"value": "false",
+		"contentType": "application/json"
+	},
+	{
+		"key": "modules.m365-identity.sources.ca-policies.delegated",
+		"value": "true",
+		"contentType": "application/json"
+	},
+	{
+		"key": "modules.m365-identity.sources.settings-catalog.beta",
+		"value": "true",
+		"contentType": "application/json"
+	},
+	{
+		"key": "modules.m365-identity.sources.settings-catalog.enabled",
+		"value": "true",
+		"contentType": "application/json"
+	},
+	{
+		"key": "mongo.database",
+		"value": "azconfigdrift"
+	},
+	{
+		"key": "mongo.ensureIndexes",
+		"value": "false",
+		"contentType": "application/json"
+	},
+	{
+		"key": "mongo.uri",
+		"value": "{\"uri\":\"https://kv-prod.vault.azure.net/secrets/drift-mongo\"}",
+		"contentType": "application/vnd.microsoft.appconfig.keyvaultref+json;charset=utf-8"
+	},
+	{
+		"key": "tenants.00000000-0000-0000-0000-00000000000a.excludeSubscriptions",
+		"value": "[\"22222222-2222-2222-2222-222222222222\"]",
+		"contentType": "application/json"
+	},
+	{
+		"key": "tenants.00000000-0000-0000-0000-00000000000b.clientId",
+		"value": "33333333-3333-3333-3333-333333333333"
+	},
+	{
+		"key": "tenants.00000000-0000-0000-0000-00000000000b.clientSecret",
+		"value": "s3cret"
+	},
+	{
+		"key": "tenants.00000000-0000-0000-0000-00000000000b.cloud",
+		"value": "usgovernment"
+	},
+	{
+		"key": "tenants.00000000-0000-0000-0000-00000000000b.password",
+		"value": "{\"uri\":\"https://kv-prod.vault.azure.net/secrets/fabrikam-svc\"}",
+		"contentType": "application/vnd.microsoft.appconfig.keyvaultref+json;charset=utf-8"
+	},
+	{
+		"key": "tenants.00000000-0000-0000-0000-00000000000b.platforms",
+		"value": "[\"m365\"]",
+		"contentType": "application/json"
+	},
+	{
+		"key": "tenants.00000000-0000-0000-0000-00000000000b.tenantName",
+		"value": "Fabrikam"
+	},
+	{
+		"key": "tenants.00000000-0000-0000-0000-00000000000b.username",
+		"value": "svc@fabrikam.com"
+	}
+]

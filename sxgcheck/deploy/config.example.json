@@ -1,0 +1,68 @@
+{
+  "mongo": {
+    "uri": "mongodb://sxgcheck:CHANGE-ME@mongo.example.internal:27017/?authSource=admin",
+    "database": "sxgcheck"
+  },
+  "interval": "1m",
+  "concurrency": 8,
+  "retention": { "logsDays": 30, "runsDays": 14, "resultsDays": 30, "eventsDays": 180 },
+  "logging": { "level": "info", "mongoLevel": "info", "format": "text" },
+
+  "defaults": {
+    "timeout": "5s",
+    "retries": 1,
+    "tcp": { "ports": [4444, 3128] },
+    "tls": { "ports": [4444], "warnDays": 30, "criticalDays": 7 },
+    "webAdmin": { "port": 4444 },
+    "proxy": {
+      "port": 3128,
+      "urls": ["http://www.msftconnecttest.com/connecttest.txt", "https://www.microsoft.com/"],
+      "warnLatency": "2s"
+    },
+    "snmp": {
+      "version": "2c",
+      "communityEnv": "SXG_SNMP_COMMUNITY",
+      "cpu": { "warn": 85, "critical": 95 },
+      "memory": { "warn": 85, "critical": 95 },
+      "disk": { "warn": 80, "critical": 90 },
+      "requiredServices": ["http", "dns", "network"],
+      "ignoreLicenses": ["mail", "webserver"],
+      "licenseWarnDays": 30
+    }
+  },
+
+  "firewalls": [
+    {
+      "name": "syd-fw01",
+      "host": "10.10.0.1",
+      "tenantName": "Production",
+      "site": "Sydney",
+      "tags": ["ha"],
+      "snmp": { "expectHa": "primary" }
+    },
+    {
+      "name": "syd-fw02",
+      "host": "10.10.0.2",
+      "tenantName": "Production",
+      "site": "Sydney",
+      "tags": ["ha"],
+      "proxy": { "enabled": false },
+      "snmp": { "expectHa": "auxiliary" }
+    },
+    {
+      "name": "mel-fw01",
+      "host": "fw.mel.example.internal",
+      "tenantName": "Production",
+      "site": "Melbourne",
+      "snmp": {
+        "version": "3",
+        "username": "monitor",
+        "authProtocol": "SHA256",
+        "authPasswordEnv": "MEL_SNMP_AUTH",
+        "privProtocol": "AES",
+        "privPasswordEnv": "MEL_SNMP_PRIV"
+      },
+      "api": { "username": "api-monitor", "passwordEnv": "MEL_API_PASSWORD" }
+    }
+  ]
+}
