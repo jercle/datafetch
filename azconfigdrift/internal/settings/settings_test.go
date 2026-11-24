@@ -307,8 +307,8 @@ func TestWhatTheDashboardWritesIsRead(t *testing.T) {
 	if len(c.Ignore) != 2 || c.Ignore[0].Type != "microsoft.web/sites" || c.Ignore[1].Module != "m365-applications" || len(c.ExtraSources) != 1 || c.ExtraSources[0].ID != "budgets" {
 		t.Errorf("lists: %+v %+v", c.Ignore, c.ExtraSources)
 	}
-	if len(c.Exclude) != 2 || !c.Excluded("azure-network", "microsoft.network/networkwatchers", "rg", "nw") || c.Excluded("azure-compute", "microsoft.network/networkwatchers", "rg", "nw") ||
-		!c.Excluded("azure-compute", "microsoft.compute/disks", "MC_aks_west", "disk") || c.Excluded("azure-network", "microsoft.network/virtualnetworks", "rg", "vnet") {
+	if len(c.Exclude) != 2 || !c.Excluded("t", "azure-network", "microsoft.network/networkwatchers", "rg", "nw") || c.Excluded("t", "azure-compute", "microsoft.network/networkwatchers", "rg", "nw") ||
+		!c.Excluded("t", "azure-compute", "microsoft.compute/disks", "MC_aks_west", "disk") || c.Excluded("t", "azure-network", "microsoft.network/virtualnetworks", "rg", "vnet") {
 		t.Errorf("exclusions: %+v", c.Exclude)
 	}
 	id := c.Modules["m365-identity"].Sources

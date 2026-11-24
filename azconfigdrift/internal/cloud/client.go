@@ -121,6 +121,12 @@ const ErrNoServiceAccount = "no_service_account"
 
 // token returns an access token for the scope: the application's own, or
 // with delegated set one for the tenant's service account.
+// Token returns an access token for a scope, for what cannot be asked
+// through Do: a script that connects by itself.
+func (c *Client) Token(ctx context.Context, scope string, delegated bool) (string, error) {
+	return c.token(ctx, scope, delegated)
+}
+
 func (c *Client) token(ctx context.Context, scope string, delegated bool) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

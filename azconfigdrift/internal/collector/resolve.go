@@ -25,6 +25,8 @@ type directory struct {
 	lookup sync.Mutex
 	// principals: object ID in lower case → name; "" when asked and not found.
 	principals map[string]string
+	// kinds: object ID → user, group, servicePrincipal or device.
+	kinds      map[string]string
 	azureOnce  sync.Once
 	azureRoles map[string]string
 	entraOnce  sync.Once
@@ -204,6 +206,12 @@ func (f *fetcher) loadPrincipals(ctx context.Context, ids []string) {
 			id, _ := o["id"].(string)
 			if name := pick(o, "displayName", "userPrincipalName", "appId"); id != "" && name != "" {
 				f.dir.principals[strings.ToLower(id)] = name
+			}
+			if kind := strings.TrimPrefix(pick(o, "@odata.type"), "#microsoft.graph."); id != "" && kind != "" {
+				if f.dir.kinds == nil {
+					f.dir.kinds = map[string]string{}
+				}
+				f.dir.kinds[strings.ToLower(id)] = kind
 			}
 		}
 		f.dir.mu.Unlock()

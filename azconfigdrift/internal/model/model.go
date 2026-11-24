@@ -25,6 +25,15 @@ const (
 	// CollChanges: one per object that was added, changed or removed
 	// between two passes.
 	CollChanges = "acd_changes"
+	// CollLeases: one per tenant, held by the collector that is reading
+	// it, so that replicas never read the same tenant at once.
+	CollLeases = "acd_leases"
+	// CollHistory: one per setting that changed since the baseline, with
+	// every value it took and the run each was first seen in.
+	CollHistory = "acd_history"
+	// CollSnapshots: one per completed run: the point in time the history
+	// can be looked at as of.
+	CollSnapshots = "acd_snapshots"
 	// CollBaselines and CollBaselineItems are written by the dashboard: a
 	// baseline is a copy of every item at one moment.
 	CollBaselines     = "acd_baselines"
@@ -43,6 +52,8 @@ const (
 	StatusPartial   = "partial"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
+	// StatusSkipped: the tenant is being read, or was just read, by another replica.
+	StatusSkipped = "skipped"
 
 	StateIdle    = "idle"
 	StateRunning = "running"
@@ -225,10 +236,28 @@ type Item struct {
 
 // ModuleSwitches is what the dashboard has set for one module: only the
 // switches someone flipped are present.
+//
+// A document either holds the default for every tenant (its ID is the
+// module's) or one tenant's own switches (ID "<tenant>/<module>", with
+// TenantID and Module set). Switch by switch, the tenant's own wins over
+// the default, unless the default is Enforced.
 type ModuleSwitches struct {
-	ID      string                    `bson:"_id" json:"id"`
-	Enabled *bool                     `bson:"enabled,omitempty" json:"enabled,omitempty"`
-	Sources map[string]SourceSwitches `bson:"sources,omitempty" json:"sources,omitempty"`
+	ID       string                    `bson:"_id" json:"id"`
+	TenantID string                    `bson:"tenantId,omitempty" json:"tenantId,omitempty"`
+	Module   string                    `bson:"module,omitempty" json:"module,omitempty"`
+	Enabled  *bool                     `bson:"enabled,omitempty" json:"enabled,omitempty"`
+	Sources  map[string]SourceSwitches `bson:"sources,omitempty" json:"sources,omitempty"`
+	// Enforced, on a default: tenants cannot have switches of their own
+	// for this module.
+	Enforced bool `bson:"enforced,omitempty" json:"enforced,omitempty"`
+}
+
+// ModuleID is the module the switches are for.
+func (m ModuleSwitches) ModuleID() string {
+	if m.Module != "" {
+		return m.Module
+	}
+	return m.ID
 }
 
 // SourceSwitches is what the dashboard has set for one source.
@@ -274,6 +303,56 @@ type Change struct {
 	HashAfter  string       `bson:"hashAfter,omitempty" json:"hashAfter,omitempty"`
 	// Refs names the identifiers in the object's settings (see Item.Refs).
 	Refs map[string]string `bson:"refs,omitempty" json:"refs,omitempty"`
+}
+
+// SettingHistory is one setting of one object that changed since a
+// baseline was saved: every value it took, oldest first, each with the run
+// it was first seen in. Path is "" for the object itself being added or
+// removed.
+type SettingHistory struct {
+	ID         string `bson:"_id" json:"id"`
+	BaselineID string `bson:"baselineId" json:"baselineId"`
+	ItemID     string `bson:"itemId" json:"itemId"`
+	Scope      `bson:",inline"`
+	Platform   string         `bson:"platform" json:"platform"`
+	Module     string         `bson:"module" json:"module"`
+	Source     string         `bson:"source" json:"source"`
+	Type       string         `bson:"type" json:"type"`
+	Name       string         `bson:"name" json:"name"`
+	Path       string         `bson:"path" json:"path"`
+	FirstAt    time.Time      `bson:"firstAt" json:"firstAt"`
+	LastAt     time.Time      `bson:"lastAt" json:"lastAt"`
+	Changes    []HistoryEntry `bson:"changes" json:"changes"`
+}
+
+// HistoryEntry is one change of a setting: the run that first saw it, and
+// the value before and after (as PathChange has them).
+type HistoryEntry struct {
+	RunID  string    `bson:"runId" json:"runId"`
+	At     time.Time `bson:"at" json:"at"`
+	Kind   string    `bson:"kind" json:"kind"`
+	Before string    `bson:"before,omitempty" json:"before,omitempty"`
+	After  string    `bson:"after,omitempty" json:"after,omitempty"`
+}
+
+// HistoryID identifies a setting's history under a baseline.
+func HistoryID(baselineID, itemID, path string) string {
+	sum := sha256.Sum256([]byte(baselineID + "\x00" + itemID + "\x00" + path))
+	return hex.EncodeToString(sum[:16])
+}
+
+// Snapshot marks a completed run as a point in time: the history up to At
+// is what had changed by then.
+type Snapshot struct {
+	ID         string    `bson:"_id" json:"id"` // the run
+	At         time.Time `bson:"at" json:"at"`
+	BaselineID string    `bson:"baselineId" json:"baselineId"`
+	Status     string    `bson:"status" json:"status"`
+	Instance   string    `bson:"instance" json:"instance"`
+	// Tenants read in this run; Objects and Settings that changed in it.
+	Tenants  []string `bson:"tenants" json:"tenants"`
+	Objects  int      `bson:"objects" json:"objects"`
+	Settings int      `bson:"settings" json:"settings"`
 }
 
 // PathChange is one setting that differs. Before and After are JSON values,
@@ -527,4 +606,24 @@ func NewID() string {
 	var b [12]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// HistoryOf turns the changes of a run into one history entry per setting:
+// each path that changed, or "" for an object that was added or removed.
+func HistoryOf(baselineID string, changes []Change) []SettingHistory {
+	var out []SettingHistory
+	for _, c := range changes {
+		paths := c.Paths
+		if c.Kind != ChangeChanged || len(paths) == 0 {
+			paths = []PathChange{{Path: "", Kind: c.Kind}}
+		}
+		for _, p := range paths {
+			out = append(out, SettingHistory{
+				ID: HistoryID(baselineID, c.ItemID, p.Path), BaselineID: baselineID, ItemID: c.ItemID, Scope: c.Scope,
+				Platform: c.Platform, Module: c.Module, Source: c.Source, Type: c.Type, Name: c.Name, Path: p.Path, FirstAt: c.At, LastAt: c.At,
+				Changes: []HistoryEntry{{RunID: c.RunID, At: c.At, Kind: p.Kind, Before: p.Before, After: p.After}},
+			})
+		}
+	}
+	return out
 }

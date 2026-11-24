@@ -315,7 +315,7 @@ func newHarness(t *testing.T, mods []catalog.Module) *harness {
 		t.Fatal(err)
 	}
 	u := a.srv.URL
-	cfg.Tenants[0].Endpoints = config.Endpoints{Authority: u, ARM: u, ARMScope: "arm", Graph: u, GraphScope: "graph", Exchange: u, ExchangeScope: "exo"}
+	cfg.Tenants[0].Endpoints = config.Endpoints{Authority: u, ARM: u, ARMScope: "arm", Graph: u, GraphScope: "graph", Exchange: u, ExchangeScope: "exo", Defender: u, DefenderScope: "defender", PowerPlatform: u, PowerPlatformScope: "pp", SharePoint: u}
 	st := store.NewMemory()
 	out := &strings.Builder{}
 	var mu sync.Mutex
@@ -766,7 +766,7 @@ func TestWholeCatalogueAgainstAnEmptyTenant(t *testing.T) {
 	h.api.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Everything that is not otherwise known is an empty list.
 		p := r.URL.Path
-		if r.Method == http.MethodGet && p != "/subscriptions" && p != "/v1.0/organization" {
+		if (r.Method == http.MethodGet || strings.Contains(p, "listTenantSettings")) && p != "/subscriptions" && p != "/v1.0/organization" {
 			h.api.set(func() { h.api.requests = append(h.api.requests, "GET "+r.URL.RequestURI()) })
 			_, _ = io.WriteString(w, `{"value": []}`)
 			return
@@ -776,10 +776,15 @@ func TestWholeCatalogueAgainstAnEmptyTenant(t *testing.T) {
 	r := h.run(t)
 	sources, singles := 0, 0
 	for _, m := range mods {
+		if !m.DefaultEnabled {
+			continue // Teams: needs PowerShell, and is off unless switched on
+		}
 		sources += len(m.Sources)
 		for _, s := range m.Sources {
-			if s.Single {
-				singles++ // the stand-in answers each with an object
+			// The stand-in answers each with an object; those read per
+			// resource have no resource to be read for.
+			if s.Single && len(s.Each) == 0 {
+				singles++
 			}
 		}
 	}
@@ -1200,5 +1205,341 @@ func TestSwitchesFromTheDatabase(t *testing.T) {
 	h.st.Fail = errors.New("database down")
 	if r := h.run(t); r.Status != model.StatusFailed {
 		t.Errorf("without the switches the pass must not run: %s", r.Status)
+	}
+}
+
+// Extensions are stored inside their machine, role definitions are named
+// by their role name, and principals carry the roles they hold.
+func TestNestingAndRolesByPrincipal(t *testing.T) {
+	const (
+		alice = "aaaaaaaa-0000-0000-0000-000000000001"
+		sp    = "b50f4398-2fa6-4884-b936-011b7ce18f68"
+		appID = "99999999-0000-0000-0000-00000000000a"
+		admin = "62e90394-69f5-4237-9190-012177145e10"
+		vm    = "/subscriptions/" + sub1 + "/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1"
+		role  = "/subscriptions/" + sub1 + "/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c"
+	)
+	all, err := catalog.Build(&config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{"azure-compute": {"resources"}, "azure-access": {"role-definitions"}, "m365-roles": {"principal-roles"}, "m365-applications": {"applications", "service-principals"}}
+	var mods []catalog.Module
+	for _, m := range all {
+		var srcs []catalog.Source
+		for _, s := range m.Sources {
+			if slices.Contains(want[m.ID], s.ID) {
+				srcs = append(srcs, s)
+			}
+		}
+		if m.Sources = srcs; len(srcs) > 0 {
+			mods = append(mods, m)
+		}
+	}
+	h := newHarness(t, mods)
+	h.api.set(func() {
+		h.api.graphRows["resources"] = []obj{
+			{"id": vm, "name": "vm1", "type": "microsoft.compute/virtualmachines", "subscriptionId": sub1, "resourceGroup": "rg", "location": "westeurope", "properties": obj{"vmSize": "D2"}},
+			{"id": vm + "/extensions/AzureMonitor", "name": "AzureMonitor", "type": "microsoft.compute/virtualmachines/extensions", "subscriptionId": sub1, "resourceGroup": "rg", "location": "westeurope", "properties": obj{"publisher": "Microsoft.Azure.Monitor"}},
+			{"id": strings.Replace(vm, "vm1", "vm2", 1), "name": "vm2", "type": "microsoft.compute/virtualmachines", "subscriptionId": sub1, "resourceGroup": "rg", "location": "westeurope", "properties": obj{"vmSize": "D2"}},
+		}
+		h.api.graphRows["authorizationresources"] = []obj{
+			{"id": role, "name": "b24988ac-6180-42a0-ab88-20f7382dd24c", "type": "microsoft.authorization/roledefinitions", "roleName": "Contributor", "properties": obj{"roleName": "Contributor", "type": "CustomRole"}},
+			{"id": "/subscriptions/" + sub1 + "/providers/Microsoft.Authorization/roleAssignments/ra1", "name": "ra1", "type": "microsoft.authorization/roleassignments",
+				"principalId": sp, "roleDefinitionId": role, "scope": "/subscriptions/" + sub1, "properties": obj{"principalId": sp, "roleDefinitionId": role, "scope": "/subscriptions/" + sub1}},
+		}
+		h.api.lists["/v1.0/directoryObjects/getByIds"] = []obj{{"id": alice, "displayName": "Alice Smith", "@odata.type": "#microsoft.graph.user"}, {"id": sp, "displayName": "Intranet", "@odata.type": "#microsoft.graph.servicePrincipal"}}
+		h.api.lists["/v1.0/roleManagement/directory/roleDefinitions"] = []obj{{"id": admin, "templateId": admin, "displayName": "Global Administrator"}}
+		h.api.lists["/v1.0/roleManagement/directory/roleAssignments"] = []obj{{"id": "d1", "principalId": alice, "roleDefinitionId": admin, "directoryScopeId": "/"}}
+		h.api.lists["/v1.0/servicePrincipals"] = []obj{{"id": sp, "appId": appID, "displayName": "Intranet", "servicePrincipalType": "Application"}}
+		h.api.lists["/v1.0/applications"] = []obj{{"id": "app-object", "appId": appID, "displayName": "Intranet"}, {"id": "app-2", "appId": "none", "displayName": "No principal"}}
+		h.api.lists["/v1.0/oauth2PermissionGrants"] = []obj{}
+	})
+	if r := h.run(t); r.Status != model.StatusSuccess {
+		t.Fatalf("run: %s\n%s", r.Status, h.log)
+	}
+	items := h.items()
+	if v := items["azure-compute/resources/vm1"]; !strings.Contains(v.Config, `"extensions":[{`) || !strings.Contains(v.Config, `"name":"AzureMonitor"`) {
+		t.Errorf("the extension is not inside its machine: %s", v.Config)
+	}
+	if v := items["azure-compute/resources/vm2"]; !strings.Contains(v.Config, `"extensions":[]`) {
+		t.Errorf("a machine without extensions: %s", v.Config)
+	}
+	if n := len(itemsOf(items, "azure-compute")); n != 2 {
+		t.Errorf("an extension is stored as an object of its own: %v", keys(itemsOf(items, "azure-compute")))
+	}
+	if _, ok := items["azure-access/role-definitions/Contributor"]; !ok {
+		t.Errorf("role definition not named by its role name: %v", keys(itemsOf(items, "azure-access")))
+	}
+	// The service principal and its app registration both carry its Azure role, named.
+	azRole := `"azureRoles":[{"roleDefinitionId":"` + role + `","scope":"/subscriptions/` + sub1 + `"}]`
+	for _, k := range []string{"m365-applications/service-principals/Intranet", "m365-applications/applications/Intranet"} {
+		if it := items[k]; !strings.Contains(it.Config, azRole) || !strings.Contains(it.Config, `"directoryRoles":[]`) || it.Refs[role] != "Contributor" {
+			t.Errorf("%s: %s %v", k, it.Config, it.Refs)
+		}
+	}
+	if it := items["m365-applications/applications/No principal"]; !strings.Contains(it.Config, `"azureRoles":[]`) {
+		t.Errorf("an application without a service principal has no roles: %s", it.Config)
+	}
+	// One object per principal that holds a role: the user and the application.
+	u := items["m365-roles/principal-roles/Alice Smith"]
+	if !strings.Contains(u.Config, `"directoryRoles":[{"directoryScopeId":"/","roleDefinitionId":"`+admin+`"}]`) || !strings.Contains(u.Config, `"principalType":"user"`) || u.Refs[admin] != "Global Administrator" {
+		t.Errorf("roles of the user: %s %v\n%v", u.Config, u.Refs, keys(itemsOf(items, "m365-roles")))
+	}
+	if a := items["m365-roles/principal-roles/Intranet"]; !strings.Contains(a.Config, azRole) {
+		t.Errorf("roles of the application: %s", a.Config)
+	}
+	// A role granted to the user shows as a change to that user.
+	before := len(h.st.Changes)
+	h.api.set(func() {
+		h.api.graphRows["authorizationresources"] = append(h.api.graphRows["authorizationresources"], obj{"id": "/subscriptions/" + sub1 + "/providers/Microsoft.Authorization/roleAssignments/ra2", "name": "ra2",
+			"type": "microsoft.authorization/roleassignments", "principalId": alice, "roleDefinitionId": role, "scope": "/subscriptions/" + sub1, "properties": obj{}})
+	})
+	h.run(t)
+	found := false
+	for _, c := range h.st.Changes[before:] {
+		found = found || (c.Source == "principal-roles" && c.Name == "Alice Smith" && c.Kind == model.ChangeChanged)
+	}
+	if !found {
+		t.Errorf("the new role is not a change to the user: %+v", h.st.Changes[before:])
+	}
+}
+
+// A tenant can have switches and exclusions of its own; a default that is
+// enforced wins over them.
+func TestTenantLevelSwitchesAndExclusions(t *testing.T) {
+	h := newHarness(t, []catalog.Module{{ID: "azure-governance", Platform: model.PlatformAzure, Name: "Governance", DefaultEnabled: true, Sources: []catalog.Source{
+		{ID: "containers", Name: "Containers", Kind: catalog.KindARG, Table: "resourcecontainers", Permission: "Reader"},
+	}}})
+	h.st.Switches = []model.ModuleSwitches{
+		{ID: "azure-governance", Enabled: flag(true)},
+		{ID: tenantID + "/azure-governance", TenantID: tenantID, Module: "azure-governance", Enabled: flag(false)},
+		{ID: "other-tenant/azure-governance", TenantID: "other-tenant", Module: "azure-governance", Sources: map[string]model.SourceSwitches{"containers": {Enabled: flag(false)}}},
+	}
+	h.api.set(func() {
+		h.api.graphRows["resourcecontainers"] = []obj{{"id": "/subscriptions/" + sub1 + "/resourceGroups/rg-a", "name": "rg-a", "type": "microsoft.resources/subscriptions/resourcegroups", "subscriptionId": sub1, "location": "westeurope", "properties": obj{"x": 1}}}
+	})
+	h.run(t)
+	if len(itemsOf(h.items(), "azure-governance")) != 0 {
+		t.Error("the tenant switched the module off for itself, and it was collected")
+	}
+	if !h.st.States["azure-governance"].Enabled {
+		t.Error("the default stays on for the other tenants")
+	}
+	// Enforced: the tenant's own switch no longer counts.
+	h.st.Switches[0].Enforced = true
+	h.run(t)
+	if len(itemsOf(h.items(), "azure-governance")) == 0 {
+		t.Error("an enforced default must win over the tenant's switch")
+	}
+
+	c := &config.Config{Exclude: []config.ExcludeRule{
+		{Type: "microsoft.network/networkwatchers"},
+		{Type: "microsoft.insights/", Enforced: true},
+		{Tenant: "t1", Type: "microsoft.network/networkwatchers", Include: true},
+		{Tenant: "t1", Type: "microsoft.insights/", Include: true},
+		{Tenant: "t2", ResourceGroup: "rg-lab"},
+	}}
+	for _, x := range []struct {
+		tenant, typ, rg string
+		want            bool
+	}{
+		{"t9", "microsoft.network/networkwatchers", "rg", true},  // the rule for everyone
+		{"t1", "microsoft.network/networkwatchers", "rg", false}, // the tenant keeps it
+		{"t1", "microsoft.insights/components", "rg", true},      // enforced: the tenant cannot
+		{"t2", "microsoft.compute/disks", "rg-lab", true},        // the tenant leaves out more
+		{"t9", "microsoft.compute/disks", "rg-lab", false},
+	} {
+		if got := c.Excluded(x.tenant, "m", x.typ, x.rg, "n"); got != x.want {
+			t.Errorf("%s %s %s: excluded %v, want %v", x.tenant, x.typ, x.rg, got, x.want)
+		}
+	}
+	if _, err := config.Parse([]byte(`{"mongo": {"uri": "x"}, "tenants": [{"tenantName": "C", "tenantId": "`+tenantID+`", "clientId": "c", "clientSecret": "s"}], "exclude": [{"tenant": "`+tenantID+`", "type": "x", "enforced": true}]}`), func(string) string { return "" }, nil); err == nil {
+		t.Error("a tenant's rule cannot be enforced")
+	}
+}
+
+// Replicas never read the same tenant at once, nor one after the other in
+// the same round; every completed run leaves a snapshot, and the history
+// of a setting keeps when it first changed and every value since.
+func TestReplicasSnapshotsAndHistory(t *testing.T) {
+	h := newHarness(t, []catalog.Module{{ID: "azure-governance", Platform: model.PlatformAzure, Name: "Governance", DefaultEnabled: true, Sources: []catalog.Source{
+		{ID: "containers", Name: "Containers", Kind: catalog.KindARG, Table: "resourcecontainers", Permission: "Reader"},
+	}}})
+	rg := func(tag string) []obj {
+		return []obj{{"id": "/subscriptions/" + sub1 + "/resourceGroups/rg-a", "name": "rg-a", "type": "microsoft.resources/subscriptions/resourcegroups", "subscriptionId": sub1, "location": "westeurope", "tags": obj{"env": tag}}}
+	}
+	h.api.set(func() { h.api.graphRows["resourcecontainers"] = rg("dev") })
+	ctx := context.Background()
+	h.c.Owner = "replica-a"
+
+	// Another replica holds the tenant: this one leaves it alone.
+	if ok, _ := h.st.AcquireTenant(ctx, tenantID, "replica-b", time.Minute, time.Now()); !ok {
+		t.Fatal("the lease was free")
+	}
+	r := h.run(t)
+	if r.Status != model.StatusSuccess || len(r.Tenants) != 1 || r.Tenants[0].Status != model.StatusSkipped || len(h.items()) != 0 || len(h.st.Snapshots) != 0 {
+		t.Fatalf("a held tenant must be skipped: %s %+v", r.Status, r.Tenants)
+	}
+	// It finished a moment ago: still not ours in this round, with a gap set.
+	h.st.ReleaseTenant(ctx, tenantID, "replica-b", true)
+	h.c.MinGap = time.Hour
+	if r = h.run(t); r.Tenants[0].Status != model.StatusSkipped {
+		t.Errorf("a tenant another replica just finished: %+v", r.Tenants[0])
+	}
+	// Asked for from the dashboard, it is read all the same.
+	if r = h.c.Run(ctx, "request", nil); r.Tenants[0].Status != model.StatusSuccess || len(h.items()) != 1 {
+		t.Fatalf("a requested pass: %+v\n%s", r.Tenants, h.log)
+	}
+	if l := h.st.Leases[tenantID]; l.Owner != "" || l.DoneBy != "replica-a" {
+		t.Errorf("the lease is given up when the tenant is done: %+v", l)
+	}
+	// What this replica finished itself does not hold it back.
+	if r = h.run(t); r.Tenants[0].Status != model.StatusSuccess {
+		t.Errorf("own tenant on the next pass: %+v", r.Tenants[0])
+	}
+	// A lease whose holder died is taken over once it has expired.
+	h.st.Leases[tenantID] = store.Lease{Owner: "replica-dead", ExpiresAt: time.Now().Add(-time.Second)}
+	if r = h.run(t); r.Tenants[0].Status != model.StatusSuccess {
+		t.Errorf("an expired lease: %+v", r.Tenants[0])
+	}
+
+	// Two changes of the same setting in two runs: one history, two entries.
+	snaps := len(h.st.Snapshots)
+	h.api.set(func() { h.api.graphRows["resourcecontainers"] = rg("test") })
+	first := h.run(t)
+	h.api.set(func() { h.api.graphRows["resourcecontainers"] = rg("prod") })
+	second := h.run(t)
+	h.run(t) // nothing changes
+	var hist []model.SettingHistory
+	for _, x := range h.st.History {
+		hist = append(hist, x)
+	}
+	if len(hist) != 1 || hist[0].Path != "tags.env" || len(hist[0].Changes) != 2 {
+		t.Fatalf("history: %+v", hist)
+	}
+	c := hist[0].Changes
+	if c[0].RunID != first.ID || c[0].Before != `"dev"` || c[0].After != `"test"` || c[1].RunID != second.ID || c[1].After != `"prod"` || !hist[0].FirstAt.Equal(c[0].At) || !hist[0].LastAt.Equal(c[1].At) {
+		t.Errorf("the entries keep the run each value was first seen in: %+v", hist[0])
+	}
+	got := h.st.Snapshots[snaps:]
+	if len(got) != 3 || got[0].ID != first.ID || got[0].Settings != 1 || got[0].Objects != 1 || got[2].Settings != 0 || len(got[0].Tenants) != 1 {
+		t.Errorf("one snapshot per completed run: %+v", got)
+	}
+}
+
+// Sentinel's content is read per workspace that Sentinel is enabled on,
+// and named by its display name.
+func TestSentinelPerWorkspace(t *testing.T) {
+	all, err := catalog.Build(&config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mods []catalog.Module
+	for _, m := range all {
+		if m.ID == "azure-sentinel" {
+			mods = append(mods, m)
+		}
+	}
+	if len(mods) != 1 || len(mods[0].Sources) != 11 {
+		t.Fatalf("the Sentinel module: %+v", mods)
+	}
+	ws := func(name string) string {
+		return "/subscriptions/" + sub1 + "/resourceGroups/rg-sec/providers/Microsoft.OperationalInsights/workspaces/" + name
+	}
+	si := "/providers/Microsoft.SecurityInsights/"
+	// Requests carry the workspace as Resource Graph gave it: in lower case.
+	at := func(name string) string { return strings.ToLower(ws(name)) }
+	h := newHarness(t, mods)
+	h.api.set(func() {
+		h.api.graphRows["resources"] = []obj{
+			{"id": ws("law-sentinel"), "name": "law-sentinel", "type": "microsoft.operationalinsights/workspaces", "subscriptionId": sub1, "resourceGroup": "rg-sec"},
+			{"id": ws("law-plain"), "name": "law-plain", "type": "microsoft.operationalinsights/workspaces", "subscriptionId": sub1, "resourceGroup": "rg-sec"},
+		}
+		h.api.lists[at("law-sentinel")+si+"onboardingStates"] = []obj{{"id": ws("law-sentinel") + si + "onboardingStates/default", "name": "default", "type": "Microsoft.SecurityInsights/onboardingStates", "properties": obj{"customerManagedKey": false}}}
+		h.api.lists[at("law-plain")+si+"onboardingStates"] = []obj{}
+		h.api.lists[at("law-sentinel")+si+"alertRules"] = []obj{{"id": ws("law-sentinel") + si + "alertRules/1111", "name": "1111", "type": "Microsoft.SecurityInsights/alertRules", "kind": "Scheduled", "etag": "\"a\"",
+			"properties": obj{"displayName": "Brute force", "enabled": true, "severity": "High", "query": "SigninLogs | take 1", "lastModifiedUtc": "2026-01-01T00:00:00Z"}}}
+		h.api.lists[at("law-sentinel")+si+"automationRules"] = []obj{{"id": ws("law-sentinel") + si + "automationRules/2222", "name": "2222", "type": "Microsoft.SecurityInsights/automationRules",
+			"properties": obj{"displayName": "Close noise", "order": 1}}}
+		h.api.lists[at("law-sentinel")+"/tables"] = []obj{{"id": ws("law-sentinel") + "/tables/SecurityEvent", "name": "SecurityEvent", "type": "Microsoft.OperationalInsights/workspaces/tables",
+			"properties": obj{"retentionInDays": 90, "totalRetentionInDays": 730, "plan": "Analytics", "provisioningState": "Succeeded", "schema": obj{"name": "SecurityEvent", "columns": []obj{{"name": "Account"}}}}}}
+		// A workspace without Sentinel must never be asked for rules.
+		h.api.lists[at("law-plain")+si+"alertRules"] = []obj{{"id": ws("law-plain") + si + "alertRules/x", "name": "x", "type": "Microsoft.SecurityInsights/alertRules", "properties": obj{"displayName": "Must not appear"}}}
+	})
+	if r := h.run(t); r.Status != model.StatusSuccess {
+		t.Fatalf("run: %s\n%s", r.Status, h.log)
+	}
+	items := h.items()
+	rule := items["azure-sentinel/alert-rules/Brute force"]
+	if rule.Type != "microsoft.securityinsights/alertrules" || rule.ResourceGroup != "rg-sec" || rule.SubscriptionID != sub1 || !strings.Contains(rule.Key, "/workspaces/law-sentinel/") ||
+		!strings.Contains(rule.Config, `"severity":"High"`) || strings.Contains(rule.Config, "etag") || strings.Contains(rule.Config, "lastModifiedUtc") {
+		t.Errorf("analytics rule: %+v\n%v", rule, keys(items))
+	}
+	if _, ok := items["azure-sentinel/automation-rules/Close noise"]; !ok {
+		t.Errorf("automation rule missing: %v", keys(items))
+	}
+	if tb := items["azure-sentinel/table-retention/SecurityEvent"]; !strings.Contains(tb.Config, `"totalRetentionInDays":730`) || !strings.Contains(tb.Config, `"plan":"Analytics"`) || strings.Contains(tb.Config, "schema") || strings.Contains(tb.Config, "provisioningState") {
+		t.Errorf("table retention: %s", tb.Config)
+	}
+	if _, ok := items["azure-sentinel/alert-rules/Must not appear"]; ok {
+		t.Error("a workspace without Sentinel was read")
+	}
+	// A rule edited in the portal is a change to that rule.
+	before := len(h.st.Changes)
+	h.api.set(func() {
+		h.api.lists[at("law-sentinel")+si+"alertRules"][0]["properties"] = obj{"displayName": "Brute force", "enabled": false, "severity": "High", "query": "SigninLogs | take 1", "lastModifiedUtc": "2026-02-02T00:00:00Z"}
+	})
+	h.run(t)
+	if got := h.st.Changes[before:]; len(got) != 1 || got[0].Name != "Brute force" || len(got[0].Paths) != 1 || got[0].Paths[0].Path != "properties.enabled" {
+		t.Errorf("a disabled rule: %+v", got)
+	}
+}
+
+// Defender XDR: custom detections and identity sensors from Graph, and
+// indicators from the Defender for Endpoint API with its own token.
+func TestDefenderModule(t *testing.T) {
+	all, err := catalog.Build(&config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mods []catalog.Module
+	for _, m := range all {
+		if m.ID == "m365-defender" {
+			mods = append(mods, m)
+		}
+	}
+	if len(mods) != 1 {
+		t.Fatal("no Defender module")
+	}
+	h := newHarness(t, mods)
+	h.api.set(func() {
+		h.api.lists["/beta/security/rules/detectionRules"] = []obj{{"id": "35079", "displayName": "LOLBin to rare TLD", "isEnabled": true,
+			"queryCondition": obj{"queryText": "DeviceNetworkEvents | take 1"}, "schedule": obj{"period": "24H"}, "lastRunDetails": obj{"lastRunDateTime": "2026-01-01T00:00:00Z", "status": "completed"}}}
+		h.api.lists["/v1.0/security/identities/sensors"] = []obj{{"id": "s-1", "displayName": "DC1", "sensorType": "domainControllerIntegrated", "healthStatus": "healthy", "version": "2.240.1",
+			"settings": obj{"description": "", "isDelayedDeploymentEnabled": false}}}
+		h.api.lists["/api/indicators"] = []obj{{"id": "17", "indicatorValue": "evil.example", "indicatorType": "DomainName", "action": "Block", "title": "Block evil.example", "severity": "High"}}
+		h.api.logins = nil
+	})
+	if r := h.run(t); r.Status != model.StatusSuccess {
+		t.Fatalf("run: %s\n%s", r.Status, h.log)
+	}
+	items := h.items()
+	if d := items["m365-defender/detection-rules/LOLBin to rare TLD"]; !strings.Contains(d.Config, `"period":"24H"`) || strings.Contains(d.Config, "lastRunDetails") {
+		t.Errorf("custom detection: %s\n%v", d.Config, keys(items))
+	}
+	if s := items["m365-defender/identity-sensors/DC1"]; !strings.Contains(s.Config, `"sensorType":"domainControllerIntegrated"`) || strings.Contains(s.Config, "healthStatus") || strings.Contains(s.Config, `"version"`) {
+		t.Errorf("sensor: %s", s.Config)
+	}
+	if i := items["m365-defender/indicators/Block evil.example"]; i.Type != "indicators" || !strings.Contains(i.Config, `"action":"Block"`) {
+		t.Errorf("indicator: %+v", i)
+	}
+	// The indicators were asked for with a token for the Defender API, not Graph's.
+	scopes := map[string]bool{}
+	for _, l := range h.api.logins {
+		scopes[l["scope"]] = true
+	}
+	if len(scopes) < 2 {
+		t.Errorf("the Defender API needs a token of its own: %v", h.api.logins)
 	}
 }

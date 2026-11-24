@@ -50,7 +50,10 @@ func TestCatalogueIsWellFormed(t *testing.T) {
 					}
 				}
 			case KindARM:
-				if !strings.HasPrefix(s.Path, "/") || !strings.Contains(s.Path, "api-version=") || m.Platform != model.PlatformAzure {
+				if strings.Contains(s.Path, "{resource}") != (len(s.Each) > 0) {
+					t.Errorf("%s: {resource} goes with Each", where)
+				}
+				if !(strings.HasPrefix(s.Path, "/") || strings.HasPrefix(s.Path, "{workspace}/") || strings.HasPrefix(s.Path, "{resource}/")) || !strings.Contains(s.Path, "api-version=") || m.Platform != model.PlatformAzure {
 					t.Errorf("%s: arm source", where)
 				}
 			case KindGraph:
@@ -63,6 +66,18 @@ func TestCatalogueIsWellFormed(t *testing.T) {
 			case KindEXO:
 				if !strings.HasPrefix(s.Cmdlet, "Get-") || s.KeyField == "" {
 					t.Errorf("%s: exo source", where)
+				}
+			case KindSPO, KindPP:
+				if !strings.HasPrefix(s.Path, "/") || s.Type == "" || m.Platform != model.PlatformM365 {
+					t.Errorf("%s: %s source", where, s.Kind)
+				}
+			case KindPwsh:
+				if !strings.HasPrefix(s.Cmdlet, "Get-") || s.Script == "" || s.KeyField == "" || m.Platform != model.PlatformM365 {
+					t.Errorf("%s: pwsh source", where)
+				}
+			case KindMDE:
+				if !strings.HasPrefix(s.Path, "/api/") || s.Type == "" || m.Platform != model.PlatformM365 {
+					t.Errorf("%s: mde source", where)
 				}
 			default:
 				t.Errorf("%s: kind %q", where, s.Kind)
@@ -94,7 +109,7 @@ func TestBuildAppliesConfiguration(t *testing.T) {
 	cfg := &config.Config{
 		ModuleDefaults: map[string]bool{"m365-exchange": true, "azure-other": false},
 		ExtraSources: []config.ExtraSource{
-			{Module: "azure-governance", ID: "budgets", Name: "Budgets", Kind: "arm", Path: "/subscriptions/{subscriptionId}/providers/Microsoft.Consumption/budgets?api-version=2023-05-01"},
+			{Module: "azure-governance", ID: "exports", Name: "Cost exports", Kind: "arm", Path: "/subscriptions/{subscriptionId}/providers/Microsoft.CostManagement/exports?api-version=2023-08-01"},
 			{Module: "custom", ModuleName: "Custom", ID: "flows", Name: "Flows", Kind: "graph", Path: "/identity/b2xUserFlows"},
 		},
 	}
@@ -110,7 +125,7 @@ func TestBuildAppliesConfiguration(t *testing.T) {
 		t.Error("module defaults")
 	}
 	g := by["azure-governance"].Sources
-	if g[len(g)-1].ID != "budgets" || g[len(g)-1].Type != "budgets" {
+	if g[len(g)-1].ID != "exports" || g[len(g)-1].Type != "exports" {
 		t.Errorf("extra arm source: %+v", g[len(g)-1])
 	}
 	if c := by["custom"]; c.Platform != model.PlatformM365 || c.Name != "Custom" || len(c.Sources) != 1 || !c.DefaultEnabled {

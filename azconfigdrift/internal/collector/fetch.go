@@ -51,6 +51,23 @@ type fetcher struct {
 	domain     string
 	domainErr  error
 
+	// cmdlets: per embedded PowerShell script, what the catalogue reads with it.
+	cmdlets map[string][]string
+	// The output of each PowerShell script, run once per pass.
+	pwshMu  sync.Mutex
+	pwshOut map[string]map[string]pwshResult
+
+	// The workspaces Microsoft Sentinel is enabled on, found once per pass.
+	sentinelOnce sync.Once
+	sentinel     []string
+	sentinelErr  error
+
+	// rolesOnce guards roleIdx: every role assignment, by principal.
+	rolesOnce sync.Once
+	roleIdx   *roleIndex
+	spOnce    sync.Once
+	spByApp   map[string]string
+
 	// dir names identifiers; attached holds the lists read to store inside
 	// other objects, by path.
 	dir      directory
@@ -106,6 +123,14 @@ func (f *fetcher) fetch(ctx context.Context, src catalog.Source, emit func([]raw
 		return f.graph(ctx, src, emit)
 	case catalog.KindEXO:
 		return f.exo(ctx, src, emit)
+	case catalog.KindMDE:
+		return f.mde(ctx, src, emit)
+	case catalog.KindSPO:
+		return f.spo(ctx, src, emit)
+	case catalog.KindPP:
+		return f.powerPlatform(ctx, src, emit)
+	case catalog.KindPwsh:
+		return f.pwsh(ctx, src, emit)
 	}
 	return fmt.Errorf("unknown kind of source %q", src.Kind)
 }
@@ -145,6 +170,13 @@ func argQuery(src catalog.Source, claimed []string) string {
 var argMeta = map[string]bool{"id": true, "name": true, "type": true, "tenantId": true, "subscriptionId": true, "resourceGroup": true, "apiVersion": true}
 
 func (f *fetcher) arg(ctx context.Context, src catalog.Source, emit func([]raw) error) error {
+	if len(src.Nest) > 0 {
+		nested, err := f.nesting(ctx, src, emit)
+		if err != nil {
+			return err
+		}
+		emit = nested
+	}
 	query := argQuery(src, f.claimed)
 	u := strings.TrimRight(f.client.Endpoints.ARM, "/") + "/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01"
 
@@ -239,6 +271,26 @@ func (f *fetcher) arg(ctx context.Context, src catalog.Source, emit func([]raw) 
 // subscription.
 func (f *fetcher) arm(ctx context.Context, src catalog.Source, emit func([]raw) error) error {
 	base := strings.TrimRight(f.client.Endpoints.ARM, "/")
+	// Sources read per resource fetch several at once: what they find is
+	// handed on one batch at a time, and named after the resource.
+	var emitMu sync.Mutex
+	parentOf := func(string) string { return "" }
+	if len(src.Each) > 0 {
+		inner := emit
+		emit = func(batch []raw) error {
+			emitMu.Lock()
+			defer emitMu.Unlock()
+			return inner(batch)
+		}
+		marker := "{resource}"
+		_, tail, _ := strings.Cut(src.Path, marker)
+		tail, _, _ = strings.Cut(tail, "?")
+		parentOf = func(path string) string {
+			p, _, _ := strings.Cut(path, "?")
+			p = strings.TrimSuffix(p, tail)
+			return p[strings.LastIndex(p, "/")+1:]
+		}
+	}
 	one := func(path, sub string) error {
 		u := base + path
 		for u != "" {
@@ -278,6 +330,14 @@ func (f *fetcher) arm(ctx context.Context, src catalog.Source, emit func([]raw) 
 						r.Body[k] = v
 					}
 				}
+				// "default" and "web" say nothing: the resource it belongs to does.
+				if parent := parentOf(path); parent != "" {
+					if src.Single {
+						r.Name = parent
+					} else {
+						r.Name = parent + " / " + r.Name
+					}
+				}
 				batch = append(batch, r)
 			}
 			if err := emit(batch); err != nil {
@@ -288,6 +348,25 @@ func (f *fetcher) arm(ctx context.Context, src catalog.Source, emit func([]raw) 
 		return nil
 	}
 	path := strings.ReplaceAll(src.Path, "{tenantId}", f.tenant.ID)
+	if strings.Contains(path, "{resource}") {
+		return f.armEach(ctx, src, path, one, emit)
+	}
+	if strings.Contains(path, "{workspace}") {
+		workspaces, err := f.sentinelWorkspaces(ctx)
+		if err != nil {
+			return err
+		}
+		for _, ws := range workspaces {
+			_, rest, _ := strings.Cut(ws, "/subscriptions/")
+			subID, _, _ := strings.Cut(rest, "/")
+			err := one(strings.ReplaceAll(path, "{workspace}", ws), subID)
+			// 404: this workspace has nothing of the kind.
+			if err != nil && !cloud.NotFound(err) {
+				return fmt.Errorf("workspace %s: %w", ws[strings.LastIndex(ws, "/")+1:], err)
+			}
+		}
+		return nil
+	}
 	if !strings.Contains(path, "{subscriptionId}") {
 		return one(path, "")
 	}
@@ -359,9 +438,38 @@ func pick(obj map[string]any, keys ...string) string {
 }
 
 func (f *fetcher) graphList(ctx context.Context, u string, delegated bool, each func([]any) error) error {
+	return f.odataList(ctx, u, f.client.Endpoints.GraphScope, delegated, each)
+}
+
+// mde reads a list of the Defender for Endpoint API, which pages as Graph does.
+func (f *fetcher) mde(ctx context.Context, src catalog.Source, emit func([]raw) error) error {
+	base := strings.TrimRight(f.client.Endpoints.Defender, "/")
+	if base == "" {
+		return &cloud.APIError{Status: http.StatusNotImplemented, Message: "this cloud has no Defender for Endpoint API"}
+	}
+	return f.odataList(ctx, base+src.Path, f.client.Endpoints.DefenderScope, src.Delegated, func(list []any) error {
+		batch := make([]raw, 0, len(list))
+		for _, o := range list {
+			obj, ok := o.(map[string]any)
+			if !ok {
+				continue
+			}
+			id := pick(obj, src.KeyField, "id")
+			if id == "" {
+				continue
+			}
+			name := pick(obj, "title", "displayName", "name", "indicatorValue")
+			batch = append(batch, raw{Key: strings.ToLower(src.Path + "/" + id), Name: name, Type: src.Type, Body: obj})
+		}
+		return emit(batch)
+	})
+}
+
+// odataList pages through a list that answers {"value": [...], "@odata.nextLink": …}.
+func (f *fetcher) odataList(ctx context.Context, u, scope string, delegated bool, each func([]any) error) error {
 	for u != "" {
 		var body any
-		if err := f.client.Do(ctx, cloud.Request{URL: u, Scope: f.client.Endpoints.GraphScope, Delegated: delegated}, &body); err != nil {
+		if err := f.client.Do(ctx, cloud.Request{URL: u, Scope: scope, Delegated: delegated}, &body); err != nil {
 			return err
 		}
 		var list []any
@@ -400,7 +508,18 @@ func (f *fetcher) graph(ctx context.Context, src catalog.Source, emit func([]raw
 		delete(obj, "id")
 		return emit([]raw{{Key: src.ID, Name: src.Name, Type: src.Type, Body: obj}})
 	}
+	if src.Principals {
+		return f.principals(ctx, src, emit)
+	}
 	basePath, _, _ := strings.Cut(src.Path, "?")
+	var roles *roleIndex
+	var spByApp map[string]string
+	if src.Roles != "" {
+		roles = f.roles(ctx)
+		if src.Roles == catalog.RolesApplication {
+			spByApp = f.servicePrincipalsByApp(ctx)
+		}
+	}
 	groups := make([]map[string][]any, len(src.Attach))
 	for i, a := range src.Attach {
 		g, err := f.attachment(ctx, src, a)
@@ -434,6 +553,16 @@ func (f *fetcher) graph(ctx context.Context, src catalog.Source, emit func([]raw
 					part = []any{}
 				}
 				obj[a.Field] = part
+			}
+			if roles != nil {
+				principal := strings.ToLower(id)
+				if src.Roles == catalog.RolesApplication {
+					// "": the application has no service principal here, and so no roles.
+					principal = spByApp[strings.ToLower(pick(obj, "appId"))]
+				}
+				if src.Roles != catalog.RolesApplication || spByApp != nil {
+					roles.into(obj, principal)
+				}
 			}
 			for _, c := range src.Children {
 				var children []any

@@ -458,7 +458,14 @@ func Run(ctx context.Context, o Options) error {
 			// Warn once per change, not on every pass.
 			started = c
 		}
-		return &collector.Collector{Cfg: c, Modules: cur.mods, Store: st, Mon: mon, Log: log, SetRun: sink.SetRun, Version: o.Version, Only: o.Modules}
+		col := &collector.Collector{Cfg: c, Modules: cur.mods, Store: st, Mon: mon, Log: log, SetRun: sink.SetRun, Version: o.Version, Only: o.Modules,
+			Owner: fmt.Sprintf("%s/%d", inst.ID, os.Getpid())}
+		if o.Loop {
+			// Replicas on the same schedule share the tenants out; one
+			// that wakes a little later does not read them all again.
+			col.MinGap = c.Interval.D() / 2
+		}
+		return col
 	}
 
 	col := apply(cur)

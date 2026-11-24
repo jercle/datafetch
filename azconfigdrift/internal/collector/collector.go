@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jercle/datafetch/azconfigdrift/internal/catalog"
@@ -35,15 +36,28 @@ type Collector struct {
 	// Only, when not empty, limits the pass to these module ids whatever
 	// their switches say (-modules).
 	Only []string
+	// Owner names this collector among its replicas: a tenant is read by
+	// the one that holds its lease. Empty: a name is made up.
+	Owner string
+	// MinGap, with replicas on a schedule: a tenant another replica
+	// finished less than this ago is not read again.
+	MinGap time.Duration
+	// LeaseTTL is how long a lease lasts without being renewed, which is
+	// how long a tenant waits after the replica reading it died.
+	LeaseTTL time.Duration
 }
 
 // pass is what stays the same for a whole run.
 type pass struct {
-	run      *model.Run
-	states   map[string]model.ModuleState
-	baseline *model.Baseline
-	covered  map[string]bool
-	claimed  []string
+	run    *model.Run
+	states map[string]model.ModuleState
+	// tenantStates: for the tenants that have switches of their own.
+	tenantStates map[string]map[string]model.ModuleState
+	baseline     *model.Baseline
+	// What changed in this run, for its snapshot.
+	objects, settings atomic.Int64
+	covered           map[string]bool
+	claimed           []string
 }
 
 const storeTimeout = 2 * time.Minute
@@ -64,7 +78,29 @@ func (c *Collector) Run(ctx context.Context, trigger string, next *time.Time) *m
 	// all drift, so it does not start.
 	sctx, cancel := context.WithTimeout(ctx, storeTimeout)
 	switches, err := c.Store.ModuleSwitches(sctx)
-	states := states(overlay(c.Cfg.Modules, switches), c.Modules)
+	var defaults []model.ModuleSwitches
+	perTenant := map[string][]model.ModuleSwitches{}
+	enforced := map[string]bool{}
+	for _, s := range switches {
+		if s.TenantID == "" {
+			s.ID = s.ModuleID()
+			defaults = append(defaults, s)
+			enforced[s.ID] = s.Enforced
+		}
+	}
+	for _, s := range switches {
+		// A tenant's own switches give way to a default that is enforced.
+		if s.TenantID != "" && !enforced[s.ModuleID()] {
+			s.ID = s.ModuleID()
+			perTenant[s.TenantID] = append(perTenant[s.TenantID], s)
+		}
+	}
+	base := overlay(c.Cfg.Modules, defaults)
+	states := states(base, c.Modules)
+	p.tenantStates = map[string]map[string]model.ModuleState{}
+	for id, own := range perTenant {
+		p.tenantStates[id] = c.only(statesOf(overlay(base, own), c.Modules))
+	}
 	if err == nil {
 		err = c.Store.SyncModules(sctx, docs, states)
 	}
@@ -72,13 +108,7 @@ func (c *Collector) Run(ctx context.Context, trigger string, next *time.Time) *m
 		p.baseline, err = c.Store.ActiveBaseline(sctx)
 	}
 	cancel()
-	p.states = states
-	if len(c.Only) > 0 {
-		p.states = map[string]model.ModuleState{}
-		for _, id := range c.Only {
-			p.states[id] = model.ModuleState{Enabled: true, DisabledSources: states[id].DisabledSources}
-		}
-	}
+	p.states = c.only(states)
 	var enabled []string
 	for _, m := range c.Modules {
 		if p.states[m.ID].Enabled {
@@ -111,6 +141,15 @@ func (c *Collector) Run(ctx context.Context, trigger string, next *time.Time) *m
 		c.Log.Warn("every module is switched off: nothing to collect")
 	}
 
+	owner, ttl := c.Owner, c.LeaseTTL
+	if owner == "" {
+		owner = "collector-" + model.NewID()
+	}
+	if ttl <= 0 {
+		ttl = max(3*c.Cfg.HeartbeatInterval.D(), 2*time.Minute)
+	}
+	var mu sync.Mutex
+	var collected []string
 	sem := make(chan struct{}, c.Cfg.Concurrency.Tenants)
 	var wg sync.WaitGroup
 	for _, t := range c.Cfg.Tenants {
@@ -123,7 +162,60 @@ func (c *Collector) Run(ctx context.Context, trigger string, next *time.Time) *m
 			case <-ctx.Done():
 				return
 			}
+			// One replica per tenant: without the lease the tenant is
+			// someone else's, now or a moment ago.
+			doneSince := now
+			if gap := time.Now().Add(-c.MinGap); c.MinGap > 0 && trigger != "request" && gap.Before(doneSince) {
+				doneSince = gap
+			}
+			lctx, lcancel := context.WithTimeout(ctx, storeTimeout)
+			mine, lerr := c.Store.AcquireTenant(lctx, t.ID, owner, ttl, doneSince)
+			lcancel()
+			if lerr != nil || !mine {
+				tr := model.TenantRun{Scope: model.Scope{TenantID: t.ID, TenantName: t.Name}, Status: model.StatusSkipped, StartedAt: time.Now().UTC(), Modules: []model.ModuleRun{}}
+				if lerr != nil {
+					tr.Status, tr.Error = model.StatusFailed, "taking the tenant's lease: "+lerr.Error()
+					c.Log.Error("tenant not collected: its lease could not be taken", "tenant", t.Name, "error", lerr)
+				} else {
+					c.Log.Info("tenant left to another replica: it is being collected, or was just collected", "tenant", t.Name)
+				}
+				c.Mon.Progress(func() {
+					run.Tenants = append(run.Tenants, tr)
+					run.TenantsDone++
+					if tr.Status == model.StatusFailed {
+						run.TenantsFailed++
+					}
+				})
+				return
+			}
+			stop := make(chan struct{})
+			go func() {
+				tick := time.NewTicker(ttl / 3)
+				defer tick.Stop()
+				for {
+					select {
+					case <-stop:
+						return
+					case <-tick.C:
+						rctx, rcancel := context.WithTimeout(context.Background(), storeTimeout)
+						if err := c.Store.RenewTenant(rctx, t.ID, owner, ttl); err != nil {
+							c.Log.Warn("the tenant's lease could not be renewed", "tenant", t.Name, "error", err)
+						}
+						rcancel()
+					}
+				}
+			}()
 			tr := c.collectTenant(ctx, p, t)
+			close(stop)
+			// Also when the pass was cancelled: the lease must not outlive it.
+			rctx, rcancel := context.WithTimeout(context.Background(), storeTimeout)
+			if err := c.Store.ReleaseTenant(rctx, t.ID, owner, tr.Status == model.StatusSuccess || tr.Status == model.StatusPartial); err != nil {
+				c.Log.Warn("the tenant's lease could not be released: it expires by itself", "tenant", t.Name, "error", err)
+			}
+			rcancel()
+			mu.Lock()
+			collected = append(collected, t.ID)
+			mu.Unlock()
 			c.Mon.Progress(func() {
 				// The tenant's entry was added when it started.
 				for i := range run.Tenants {
@@ -145,7 +237,7 @@ func (c *Collector) Run(ctx context.Context, trigger string, next *time.Time) *m
 	var partial bool
 	c.Mon.Progress(func() {
 		for _, t := range run.Tenants {
-			if t.Status != model.StatusSuccess {
+			if t.Status != model.StatusSuccess && t.Status != model.StatusSkipped {
 				partial = true
 			}
 		}
@@ -158,12 +250,64 @@ func (c *Collector) Run(ctx context.Context, trigger string, next *time.Time) *m
 	case partial:
 		status = model.StatusPartial
 	}
+	// The point in time this run stands for: what had changed by now.
+	if len(collected) > 0 && status != model.StatusCancelled {
+		baselineID := ""
+		if p.baseline != nil {
+			baselineID = p.baseline.ID
+		}
+		sort.Strings(collected)
+		sctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+		err := c.Store.SaveSnapshot(sctx, model.Snapshot{ID: run.ID, At: time.Now().UTC(), BaselineID: baselineID, Status: status, Instance: owner,
+			Tenants: collected, Objects: int(p.objects.Load()), Settings: int(p.settings.Load())})
+		cancel()
+		if err != nil {
+			c.Log.Warn("the run's snapshot could not be saved", "error", err)
+		}
+	}
 	c.Mon.FinishRun(ctx, run, status, errText, next)
 	c.Log.Info("pass finished", "status", status, "duration", time.Since(run.StartedAt).Round(time.Second).String(),
 		"items", run.Counts.Items, "added", run.Counts.Added, "changed", run.Counts.Changed, "removed", run.Counts.Removed,
 		"drifted", run.Counts.Drifted, "sourcesFailed", run.Counts.SourcesFailed, "sourcesDenied", run.Counts.SourcesDenied)
 	return run
 }
+
+// scriptCmdlets lists, per embedded PowerShell script, the cmdlets the
+// catalogue reads with it.
+func scriptCmdlets(mods []catalog.Module) map[string][]string {
+	out := map[string][]string{}
+	for _, m := range mods {
+		for _, s := range m.Sources {
+			if s.Kind == catalog.KindPwsh {
+				out[s.Script] = append(out[s.Script], s.Cmdlet)
+			}
+		}
+	}
+	return out
+}
+
+// only narrows the states to the modules named with -modules, which are
+// then collected whatever their switch says.
+func (c *Collector) only(states map[string]model.ModuleState) map[string]model.ModuleState {
+	if len(c.Only) == 0 {
+		return states
+	}
+	out := map[string]model.ModuleState{}
+	for _, id := range c.Only {
+		out[id] = model.ModuleState{Enabled: true, DisabledSources: states[id].DisabledSources, SourceBeta: states[id].SourceBeta, SourceDelegated: states[id].SourceDelegated}
+	}
+	return out
+}
+
+// statesFor returns the switches a tenant is collected with.
+func (p *pass) statesFor(tenantID string) map[string]model.ModuleState {
+	if s, ok := p.tenantStates[tenantID]; ok {
+		return s
+	}
+	return p.states
+}
+
+var statesOf = states
 
 // overlay lays the switches set in the dashboard over the configuration's,
 // switch by switch.
@@ -273,7 +417,7 @@ func (c *Collector) collectTenant(ctx context.Context, p *pass, t config.Tenant)
 	}
 	env := &tenantEnv{
 		pass: p, tenant: t, scope: scope, log: log, ignore: catalog.NewIgnore(c.Cfg),
-		fetcher: &fetcher{client: newClient(t, log), tenant: t, log: log, claimed: p.claimed},
+		fetcher: &fetcher{client: newClient(t, log), tenant: t, log: log, claimed: p.claimed, cmdlets: scriptCmdlets(c.Modules)},
 	}
 
 	sctx, cancel := context.WithTimeout(ctx, storeTimeout)
@@ -291,7 +435,7 @@ func (c *Collector) collectTenant(ctx context.Context, p *pass, t config.Tenant)
 	var mods []catalog.Module
 	azure := false
 	for _, m := range c.Modules {
-		if p.states[m.ID].Enabled && t.Has(m.Platform) {
+		if p.statesFor(t.ID)[m.ID].Enabled && t.Has(m.Platform) {
 			mods = append(mods, m)
 			azure = azure || m.Platform == model.PlatformAzure
 		}
@@ -419,7 +563,7 @@ func (c *Collector) collectTenant(ctx context.Context, p *pass, t config.Tenant)
 func (c *Collector) collectModule(ctx context.Context, env *tenantEnv, m catalog.Module) (model.ModuleRun, model.TenantModule) {
 	start := time.Now().UTC()
 	log := env.log.With("module", m.ID)
-	state := env.pass.states[m.ID]
+	state := env.pass.statesFor(env.tenant.ID)[m.ID]
 	mr := model.ModuleRun{Module: m.ID, Sources: []model.SourceRun{}}
 	entry := model.TenantModule{Module: m.ID, Platform: m.Platform, At: start}
 	prev := env.prev.Module(m.ID)

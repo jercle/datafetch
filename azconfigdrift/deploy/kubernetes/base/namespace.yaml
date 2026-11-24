@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: az-config-drift
+  labels:
+    # The collector needs nothing a restricted pod may not do.
+    pod-security.kubernetes.io/enforce: restricted

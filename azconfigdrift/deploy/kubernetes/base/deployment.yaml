@@ -1,0 +1,66 @@
+# az-config-drift on Azure Kubernetes Service (or any Kubernetes).
+#
+#   kubectl apply -k deploy/kubernetes/base            # with a Secret made from secret.example.yaml
+#   kubectl apply -k deploy/kubernetes/overlays/production   # secrets from Key Vault
+#
+# Replicas: every replica runs the same schedule. Before reading a tenant a
+# replica takes that tenant's lease in MongoDB (acd_leases), so a tenant is
+# never read by two at once, and one a replica just finished is not read
+# again by the next. With more tenants than `concurrency.tenants`, replicas
+# share the work; with fewer, the extra ones are standbys. A replica that
+# dies gives its tenants up when its leases expire (three heartbeats, at
+# least two minutes).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: az-config-drift
+  labels: { app.kubernetes.io/name: az-config-drift }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app.kubernetes.io/name: az-config-drift }
+  strategy:
+    rollingUpdate: { maxUnavailable: 1, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: az-config-drift }
+    spec:
+      serviceAccountName: az-config-drift
+      # A pass that is interrupted releases its leases; give it time to.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: az-config-drift }
+      containers:
+        - name: collector
+          image: REGISTRY.azurecr.io/datafetch:TAG
+          # The image is datafetch, with every tool in it: the tool comes first.
+          args: ["az-config-drift", "-loop"]
+          # The settings come from Azure App Configuration (general and
+          # tenant settings) and MongoDB (module switches). To use a file as
+          # well, mount it and add: "-config", "/etc/az-config-drift/config.json"
+          envFrom:
+            - secretRef: { name: az-config-drift }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: az-config-drift
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: az-config-drift }

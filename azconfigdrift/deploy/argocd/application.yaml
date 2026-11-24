@@ -1,0 +1,37 @@
+# Argo CD keeps the cluster at what this repository says.
+#
+#   kubectl apply -n argocd -f deploy/argocd/application.yaml
+#
+# Fork or copy the overlay into a repository of yours first: the overlay
+# holds your registry, App Configuration store and Key Vault.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: az-config-drift
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/jercle/datafetch.git   # <- yours
+    targetRevision: main                                     # <- a tag, for production
+    path: azconfigdrift/deploy/kubernetes/overlays/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: az-config-drift
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # the base brings the namespace, with its pod security label
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 30s, factor: 2, maxDuration: 10m }
+  # The driver writes the Secret; Argo CD must not fight it or prune it.
+  ignoreDifferences:
+    - kind: Secret
+      name: az-config-drift
+      jsonPointers: [/data]
